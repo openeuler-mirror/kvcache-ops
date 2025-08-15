@@ -239,8 +239,6 @@ extern void load_and_reshape_flash_kernel(kvcache_ops::AscendType type, kvcache_
                             const int32_t pagedSize, const int32_t numTokens, const int32_t numLayers,
                             const int32_t layerIdx, bool page2L)
 {
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
-
     switch(type) {
         case kvcache_ops::AscendType::FP16:
             dispatch_on_slot_type<half>(slotType, blockDim, stream, dstCacheTensor, keyCachePtr, valueCachePtr, 
