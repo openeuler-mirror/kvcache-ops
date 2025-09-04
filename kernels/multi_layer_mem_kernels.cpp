@@ -149,8 +149,10 @@ private:
 // Declare support kernel entry
 MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int32_t);
 MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int64_t);
+#if (__CCE_AICORE__ >= 220)
 MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int32_t);
 MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int64_t);
+#endif
 MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int32_t);
 MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int64_t);
 
@@ -179,8 +181,10 @@ void multi_layer_paged_kernel<TYPE, SLOTTYPE>(uint32_t blockDim, void *stream, u
 
 MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int32_t);
 MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int64_t);
+#if (__CCE_AICORE__ >= 220)
 MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int32_t);
 MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int64_t);
+#endif
 MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int32_t);
 MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int64_t);
 
@@ -215,11 +219,13 @@ extern void multi_layer_kv_transfer_kernel(kvcache_ops::AscendType type, kvcache
                                                      slotmappings, hiddenDims, kvs, numLayers, pageBuffSize, 
                                                      numTokensChunk, page2L);
             break;
+#if (__CCE_AICORE__ >= 220)
         case kvcache_ops::AscendType::BF16:
             dispatch_paged_kernel_on_slot_type<bfloat16_t>(slotType, blockDim, stream, pagedKVCaches, dstCacheTensor, 
                                                            slotmappings, hiddenDims, kvs, numLayers, pageBuffSize, 
                                                            numTokensChunk, page2L);
             break;
+#endif
         case kvcache_ops::AscendType::INT8:
             dispatch_paged_kernel_on_slot_type<int8_t>(slotType, blockDim, stream, pagedKVCaches, dstCacheTensor, 
                                                         slotmappings, hiddenDims, kvs, numLayers, pageBuffSize, 

@@ -194,15 +194,19 @@ private:
 // Declare support kernel entry
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int32_t, false);
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int32_t, true);
+#if (__CCE_AICORE__ >= 220)
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int32_t, false);
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int32_t, true);
+#endif
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int32_t, false);
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int32_t, true);
 
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int64_t, false);
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int64_t, true);
+#if (__CCE_AICORE__ >= 220)
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int64_t, false);
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int64_t, true);
+#endif
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int64_t, false);
 SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int64_t, true);
 
@@ -230,15 +234,19 @@ void single_layer_paged_kernel<TYPE, SLOTTYPE, ISMLA>(uint32_t blockDim, void *s
 
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int32_t, false);
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int64_t, false);
+#if (__CCE_AICORE__ >= 220)
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int32_t, false);
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int64_t, false);
+#endif
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int32_t, false);
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int64_t, false);
 
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int32_t, true);
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int64_t, true);
+#if (__CCE_AICORE__ >= 220)
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int32_t, true);
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int64_t, true);
+#endif
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int32_t, true);
 SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int64_t, true);
 
@@ -292,11 +300,13 @@ extern void single_layer_kv_transfer_kernel(kvcache_ops::AscendType type, kvcach
                                                             valueCachePtr, slotmappings, hiddenDims, numTokens, page2L, 
                                                             tokenMajor, isMLA);
             break;
+#if (__CCE_AICORE__ >= 220)
         case kvcache_ops::AscendType::BF16:
             dispatch_single_layer_kernel_on_slot_type<bfloat16_t>(slotType, blockDim, stream, dstCacheTensor, keyCachePtr, 
                                                                   valueCachePtr, slotmappings, hiddenDims, numTokens, 
                                                                   page2L, tokenMajor, isMLA);
             break;
+#endif
         case kvcache_ops::AscendType::INT8:
             dispatch_single_layer_kernel_on_slot_type<int8_t>(slotType, blockDim, stream, dstCacheTensor, keyCachePtr, 
                                                               valueCachePtr, slotmappings, hiddenDims, numTokens, page2L, 
