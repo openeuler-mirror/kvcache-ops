@@ -173,8 +173,10 @@ private:
 // Declare support kernel entry
 LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(half, int32_t);
 LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(half, int64_t);
+#if (__CCE_AICORE__ >= 220)
 LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(bfloat16_t, int32_t);
 LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(bfloat16_t, int64_t);
+#endif
 LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(int8_t, int32_t);
 LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(int8_t, int64_t);
 
@@ -205,8 +207,10 @@ void load_and_reshape_kernel_call<TYPE, SLOTTYPE>(uint32_t blockDim, void *strea
 
 LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(half, int32_t);
 LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(half, int64_t);
+#if (__CCE_AICORE__ >= 220)
 LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int32_t);
 LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int64_t);
+#endif
 LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(int8_t, int32_t);
 LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(int8_t, int64_t);
 
@@ -245,11 +249,13 @@ extern void load_and_reshape_flash_kernel(kvcache_ops::AscendType type, kvcache_
                                         slotmappings, hiddenDims, numPages, pagedSize, numTokens, numLayers, layerIdx,
                                         page2L);
             break;
+#if (__CCE_AICORE__ >= 220)
         case kvcache_ops::AscendType::BF16:
             dispatch_on_slot_type<bfloat16_t>(slotType, blockDim, stream, dstCacheTensor, keyCachePtr, valueCachePtr, 
                                         slotmappings, hiddenDims, numPages, pagedSize, numTokens, numLayers, layerIdx,
                                         page2L);
             break;
+#endif
         case kvcache_ops::AscendType::INT8:
             dispatch_on_slot_type<int8_t>(slotType, blockDim, stream, dstCacheTensor, keyCachePtr, valueCachePtr, 
                                         slotmappings, hiddenDims, numPages, pagedSize, numTokens, numLayers, layerIdx,
