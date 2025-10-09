@@ -244,7 +244,8 @@ void dispatch_paged_kernel_on_slot_type_v2(kvcache_ops::AscendType slotType, uin
                                      hiddenDims, kvs, numLayers, pageBuffSize, numTokensChunk, page2L);
             break;
         default:
-            return;
+            ASCENDC_REPORT_NOT_SUPPORT(false, std::to_string(static_cast<int>(slotType)) + " is not supported.")
+            throw std::runtime_error("Slot type: " + std::to_string(static_cast<int>(slotType)) + " not supported. This should not have happened.");
     }
 }
 

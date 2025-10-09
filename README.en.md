@@ -1,36 +1,27 @@
-# kvcache-ops
+# KVCache Ops
 
-#### Description
-An Ascend operator library for KVCache management
+KVCache Ops is a simple library containing LLM KVCache related operators for Ascend NPU.
 
-#### Software Architecture
-Software architecture description
+We currently have a few operators that support KVCache offload/reload (D2H & H2D).
 
-#### Installation
+## Compilation
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+To compile the kernels, we leverage the ascendc_library function from the ascend_toolkit.
 
-#### Instructions
+This means that we can leverage compilation macros like `__CCE_AICORE__` to switch between implementation at compile time for the device side.
 
-1.  xxxx
-2.  xxxx
-3.  xxxx
+However, we have embedded the host side execution part also in the kernels files, and therefore we introduce the host side macro `ASCEND_AICORE_ARCH` for host side compilation.
 
-#### Contribution
+To use the kernels and compile in your application, you can try the following:
 
-1.  Fork the repository
-2.  Create Feat_xxx branch
-3.  Commit your code
-4.  Create Pull Request
+```
+# CMakeLists.txt
+# assume kvcache-ops is a submodule in your main application
+# ...
+add_subdirectory(third_party/kvcache-ops)
+# ...
+```
 
+## Future work
 
-#### Gitee Feature
-
-1.  You can use Readme\_XXX.md to support different languages, such as Readme\_en.md, Readme\_zh.md
-2.  Gitee blog [blog.gitee.com](https://blog.gitee.com)
-3.  Explore open source project [https://gitee.com/explore](https://gitee.com/explore)
-4.  The most valuable open source project [GVP](https://gitee.com/gvp)
-5.  The manual of Gitee [https://gitee.com/help](https://gitee.com/help)
-6.  The most popular members  [https://gitee.com/gitee-stars/](https://gitee.com/gitee-stars/)
+Separate the arguments into a op host tiling data structure and modify the build step for the kernels.
