@@ -16,6 +16,8 @@
 #include "kernel_operator.h"
 #include <stdio.h>
 #include "types.h"
+#include <string>
+#include <stdexcept>
 
 template <typename scalar_t, typename slot_t> class LoadAndReshapeFlashCopy {
     using local_scalar_t = AscendC::LocalTensor<scalar_t>;
@@ -170,15 +172,17 @@ private:
         }                                                                                                              \
     }
 
-// Declare support kernel entry
-LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(half, int32_t);
-LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(half, int64_t);
+#define LOAD_AND_RESHAPE_FLASH_COPY_TYPE_SLOTTYPE_DECLARE(TYPE)       \
+    LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(TYPE, int32_t); \
+    LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(TYPE, int64_t);
+
+// Declare support kernel entry in the device side
+LOAD_AND_RESHAPE_FLASH_COPY_TYPE_SLOTTYPE_DECLARE(half);
+LOAD_AND_RESHAPE_FLASH_COPY_TYPE_SLOTTYPE_DECLARE(int8_t);
 #if (__CCE_AICORE__ >= 220)
-LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(bfloat16_t, int32_t);
-LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(bfloat16_t, int64_t);
+// device side being expanded
+LOAD_AND_RESHAPE_FLASH_COPY_TYPE_SLOTTYPE_DECLARE(bfloat16_t);
 #endif
-LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(int8_t, int32_t);
-LOAD_AND_RESHAPE_FLASH_COPY_TYPE_DECLARE(int8_t, int64_t);
 
 namespace kvcache_ops {
 
@@ -205,14 +209,16 @@ void load_and_reshape_kernel_call<TYPE, SLOTTYPE>(uint32_t blockDim, void *strea
     LOAD_AND_RESHAPE_FLASH_COPY_KERNEL_CALL(TYPE, SLOTTYPE);                                                           \
 }
 
-LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(half, int32_t);
-LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(half, int64_t);
-#if (__CCE_AICORE__ >= 220)
-LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int32_t);
-LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int64_t);
+#define LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_SLOTTYPE_DECLARE(TYPE) \
+    LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(TYPE, int32_t);    \
+    LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(TYPE, int64_t);
+
+// host side declartion
+LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_SLOTTYPE_DECLARE(half);
+LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_SLOTTYPE_DECLARE(int8_t);
+#if (ASCEND_AICORE_ARCH >= 220)
+LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_SLOTTYPE_DECLARE(bfloat16_t);
 #endif
-LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(int8_t, int32_t);
-LOAD_AND_RESHAPE_KERNEL_CALL_TYPE_DECLARE(int8_t, int64_t);
 
 template<typename T>
 void dispatch_on_slot_type(kvcache_ops::AscendType slotType, uint32_t blockDim, void *stream, 
@@ -249,7 +255,7 @@ extern void load_and_reshape_flash_kernel(kvcache_ops::AscendType type, kvcache_
                                         slotmappings, hiddenDims, numPages, pagedSize, numTokens, numLayers, layerIdx,
                                         page2L);
             break;
-#if (__CCE_AICORE__ >= 220)
+#if (ASCEND_AICORE_ARCH >= 220)
         case kvcache_ops::AscendType::BF16:
             dispatch_on_slot_type<bfloat16_t>(slotType, blockDim, stream, dstCacheTensor, keyCachePtr, valueCachePtr, 
                                         slotmappings, hiddenDims, numPages, pagedSize, numTokens, numLayers, layerIdx,
@@ -262,7 +268,8 @@ extern void load_and_reshape_flash_kernel(kvcache_ops::AscendType type, kvcache_
                                         page2L);
             break;
         default:
-            return;
+            ASCENDC_REPORT_NOT_SUPPORT(false, std::to_string(static_cast<int>(type)) + " is not supported.")
+            throw std::runtime_error("Scalar type: " + std::to_string(static_cast<int>(type)) + " not supported. This should not have happened.");
     }
 }
 
