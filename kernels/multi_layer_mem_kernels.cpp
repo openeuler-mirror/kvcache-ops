@@ -16,6 +16,8 @@
 #include "kernel_operator.h"
 #include <stdio.h>
 #include "types.h"
+#include <string>
+#include <stdexcept>
 
 template <typename scalar_t, typename slot_t> class MultiLayerPagedKVCopy {
     using local_scalar_t = AscendC::LocalTensor<scalar_t>;
@@ -146,15 +148,17 @@ private:
         }                                                                                                              \
     }
 
-// Declare support kernel entry
-MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int32_t);
-MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int64_t);
+#define MULTI_LAYER_PAGED_KV_COPY_TYPE_SLOTTYPE_DECLARE(TYPE) \
+    MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(TYPE, int32_t);    \
+    MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(TYPE, int64_t);
+
+// Declare support kernel entry in device side
+MULTI_LAYER_PAGED_KV_COPY_TYPE_SLOTTYPE_DECLARE(half);
+MULTI_LAYER_PAGED_KV_COPY_TYPE_SLOTTYPE_DECLARE(int8_t);
 #if (__CCE_AICORE__ >= 220)
-MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int32_t);
-MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int64_t);
+// At the device side, the macro will be expanded.
+MULTI_LAYER_PAGED_KV_COPY_TYPE_SLOTTYPE_DECLARE(bfloat16_t);
 #endif
-MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int32_t);
-MULTI_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int64_t);
 
 namespace kvcache_ops {
 
@@ -179,14 +183,16 @@ void multi_layer_paged_kernel<TYPE, SLOTTYPE>(uint32_t blockDim, void *stream, u
     MULTI_LAYER_PAGED_KV_COPY_KERNEL_CALL(TYPE, SLOTTYPE);                                                             \
 }
 
-MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int32_t);
-MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int64_t);
-#if (__CCE_AICORE__ >= 220)
-MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int32_t);
-MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int64_t);
+#define MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_SLOTTYPE_DECLARE(TYPE) \
+    MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(TYPE, int32_t);    \
+    MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(TYPE, int64_t);
+
+// Declare and define the functions for the host side calling
+MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_SLOTTYPE_DECLARE(half);
+MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_SLOTTYPE_DECLARE(int8_t);
+#if (ASCEND_AICORE_ARCH >= 220)
+MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_SLOTTYPE_DECLARE(bfloat16_t);
 #endif
-MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int32_t);
-MULTI_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int64_t);
 
 template<typename T>
 void dispatch_paged_kernel_on_slot_type(kvcache_ops::AscendType slotType, uint32_t blockDim, void *stream,
@@ -219,7 +225,7 @@ extern void multi_layer_kv_transfer_kernel(kvcache_ops::AscendType type, kvcache
                                                      slotmappings, hiddenDims, kvs, numLayers, pageBuffSize, 
                                                      numTokensChunk, page2L);
             break;
-#if (__CCE_AICORE__ >= 220)
+#if (ASCEND_AICORE_ARCH >= 220)
         case kvcache_ops::AscendType::BF16:
             dispatch_paged_kernel_on_slot_type<bfloat16_t>(slotType, blockDim, stream, pagedKVCaches, dstCacheTensor, 
                                                            slotmappings, hiddenDims, kvs, numLayers, pageBuffSize, 
@@ -232,7 +238,8 @@ extern void multi_layer_kv_transfer_kernel(kvcache_ops::AscendType type, kvcache
                                                         numTokensChunk, page2L);
             break;
         default:
-            return;
+            ASCENDC_REPORT_NOT_SUPPORT(false, std::to_string(static_cast<int>(type)) + " is not supported.")
+            throw std::runtime_error("Scalar type: " + std::to_string(static_cast<int>(type)) + " not supported. This should not have happened.");
     }
 }
 

@@ -1,11 +1,15 @@
-if(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
-    set(ASCENDC_CMAKE_DIR ${ASCEND_CANN_PACKAGE_PATH}/compiler/tikcpp/ascendc_kernel_cmake)
-elseif(EXISTS ${ASCEND_CANN_PACKAGE_PATH}/tools/tikcpp/ascendc_kernel_cmake)
-    set(ASCENDC_CMAKE_DIR ${ASCEND_CANN_PACKAGE_PATH}/tools/tikcpp/ascendc_kernel_cmake)
-else()
-    message(FATAL_ERROR "ascendc_kernel_cmake does not exist ,please check whether the cann package is installed")
-endif()
-include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
+include(ascendc_with_def.cmake)
 
-# ascendc_library use to add kernel file to generate ascendc library
-ascendc_library(cache_kernels SHARED ${KERNEL_FILES})
+# ascendc_library used to add kernel files to generate ascendc library
+if (DEFINED ASCEND_AICORE_ARCH)
+    message(STATUS "ASCEND_AICORE_ARCH Set: ${ASCEND_AICORE_ARCH} - use custom ascendc_library")
+
+    ascendc_library_with_def(cache_kernels SHARED ${KERNEL_FILES})
+    
+    ascendc_compile_definitions(cache_kernels PRIVATE
+        -DASCEND_AICORE_ARCH=${ASCEND_AICORE_ARCH}
+    )
+else()
+    message(STATUS "Use default ascendc_library")
+    ascendc_library(cache_kernels SHARED ${KERNEL_FILES})
+endif()

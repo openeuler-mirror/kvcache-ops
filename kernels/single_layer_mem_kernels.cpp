@@ -16,6 +16,8 @@
 #include "kernel_operator.h"
 #include <stdio.h>
 #include "types.h"
+#include <string>
+#include <stdexcept>
 
 template <typename scalar_t, typename slot_t, bool IsMLA> class SingleLayerPagedKVCopy {
     using local_scalar_t = AscendC::LocalTensor<scalar_t>;
@@ -191,24 +193,20 @@ private:
         }                                                                                                              \
     }
 
-// Declare support kernel entry
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int32_t, false);
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int32_t, true);
-#if (__CCE_AICORE__ >= 220)
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int32_t, false);
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int32_t, true);
-#endif
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int32_t, false);
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int32_t, true);
+#define SINGLE_LAYER_PAGED_KV_COPY_TYPE_SLOTTYPE_MLA_DECLARE_DEVICE(TYPE)   \
+    SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(TYPE, int32_t, false);  \
+    SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(TYPE, int32_t, true);   \
+    SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(TYPE, int64_t, false);  \
+    SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(TYPE, int64_t, true); 
 
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int64_t, false);
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(half, int64_t, true);
+
+// Declare support kernel entry at the device side
+SINGLE_LAYER_PAGED_KV_COPY_TYPE_SLOTTYPE_MLA_DECLARE_DEVICE(half);
+SINGLE_LAYER_PAGED_KV_COPY_TYPE_SLOTTYPE_MLA_DECLARE_DEVICE(int8_t);
 #if (__CCE_AICORE__ >= 220)
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int64_t, false);
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(bfloat16_t, int64_t, true);
+SINGLE_LAYER_PAGED_KV_COPY_TYPE_SLOTTYPE_MLA_DECLARE_DEVICE(bfloat16_t);
 #endif
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int64_t, false);
-SINGLE_LAYER_PAGED_KV_COPY_TYPE_DECLARE(int8_t, int64_t, true);
+
 
 namespace kvcache_ops {
 
@@ -231,24 +229,18 @@ void single_layer_paged_kernel<TYPE, SLOTTYPE, ISMLA>(uint32_t blockDim, void *s
     SINGLE_LAYER_PAGED_KV_COPY_KERNEL_CALL(TYPE, SLOTTYPE, ISMLA);                                                     \
 }
 
+#define SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_SLOTTYPE_MLA_DECLARE_HOST(TYPE)  \
+    SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(TYPE, int32_t, false);       \
+    SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(TYPE, int64_t, false);       \
+    SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(TYPE, int32_t, true);        \
+    SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(TYPE, int64_t, true);
 
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int32_t, false);
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int64_t, false);
-#if (__CCE_AICORE__ >= 220)
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int32_t, false);
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int64_t, false);
+// Declare kernel entry at the host side
+SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_SLOTTYPE_MLA_DECLARE_HOST(half);
+SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_SLOTTYPE_MLA_DECLARE_HOST(int8_t);
+#if (ASCEND_AICORE_ARCH >= 220)
+SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_SLOTTYPE_MLA_DECLARE_HOST(bfloat16_t);
 #endif
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int32_t, false);
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int64_t, false);
-
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int32_t, true);
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(half, int64_t, true);
-#if (__CCE_AICORE__ >= 220)
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int32_t, true);
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(bfloat16_t, int64_t, true);
-#endif
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int32_t, true);
-SINGLE_LAYER_PAGED_KERNEL_CALL_TYPE_DECLARE(int8_t, int64_t, true);
 
 
 
@@ -300,7 +292,7 @@ extern void single_layer_kv_transfer_kernel(kvcache_ops::AscendType type, kvcach
                                                             valueCachePtr, slotmappings, hiddenDims, numTokens, page2L, 
                                                             tokenMajor, isMLA);
             break;
-#if (__CCE_AICORE__ >= 220)
+#if (ASCEND_AICORE_ARCH >= 220)
         case kvcache_ops::AscendType::BF16:
             dispatch_single_layer_kernel_on_slot_type<bfloat16_t>(slotType, blockDim, stream, dstCacheTensor, keyCachePtr, 
                                                                   valueCachePtr, slotmappings, hiddenDims, numTokens, 
@@ -312,7 +304,8 @@ extern void single_layer_kv_transfer_kernel(kvcache_ops::AscendType type, kvcach
                                                               valueCachePtr, slotmappings, hiddenDims, numTokens, page2L, 
                                                               tokenMajor, isMLA);
         default:
-            return;
+            ASCENDC_REPORT_NOT_SUPPORT(false, std::to_string(static_cast<int>(type)) + " is not supported.")
+            throw std::runtime_error("Scalar type: " + std::to_string(static_cast<int>(type)) + " not supported. This should not have happened.");
     }
 }
 
