@@ -1,6 +1,7 @@
 #include "kernel_operator.h"
 #include "fused_rope_bf16.h"
 #include "fused_rope_fp32.h"
+#include "../types.h"
 
 using namespace AscendC;
 using namespace FusedRope;
@@ -18,7 +19,7 @@ extern "C" __global__ __aicore__ void FusedRopeKernel(
 {
     TPipe pipe;
     // DT_BF16
-    if (tilingKey == 20) {
+    if (tilingKey == (uint64_t)kvcache_ops::AscendType::BF16) {
         TPipe* ptr = &pipe;
         if (ptr != nullptr) {
             FusedRopeFP16<bfloat16_t> op;
@@ -35,7 +36,7 @@ extern "C" __global__ __aicore__ void FusedRopeKernel(
         }
     }
     // DT_FLOAT16
-    if (tilingKey == 21) {
+    if (tilingKey == (uint64_t)kvcache_ops::AscendType::FP16) {
         TPipe* ptr = &pipe;
         if (ptr != nullptr) {
             FusedRopeFP16<half> op;
@@ -52,7 +53,7 @@ extern "C" __global__ __aicore__ void FusedRopeKernel(
         }
     }
     // DT_FLOAT
-    if (tilingKey == 22) {
+    if (tilingKey == (uint64_t)kvcache_ops::AscendType::FP32) {
         TPipe* ptr = &pipe;
         if (ptr != nullptr) {
             FusedRopeFP32<float> op;
