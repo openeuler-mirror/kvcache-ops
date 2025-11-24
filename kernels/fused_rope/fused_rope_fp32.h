@@ -316,11 +316,11 @@ __aicore__ inline void FusedRopeFP32<T>::Compute(uint64_t index, uint64_t loopN)
         for (uint32_t i = 0; i < loopN * this->numHeads; i++) {
             GatherMask(
                 inQueCalLocal[i * this->rotaryDim], temp1Local[i * this->rotaryDim], static_cast<uint8_t>(1), true,
-                this->rotaryDim, {1, 1, 0, 0}, rsv);
+                this->rotaryDim, {1, 1, 8, 0}, rsv);
             PipeBarrier<PIPE_ALL>();
             GatherMask(
                 inQueCalLocal[i * this->rotaryDim + this->rotaryDim / 2], temp1Local[i * this->rotaryDim],
-                static_cast<uint8_t>(2), true, this->rotaryDim, {1, 1, 0, 0}, rsv);
+                static_cast<uint8_t>(2), true, this->rotaryDim, {1, 1, 8, 0}, rsv);
             PipeBarrier<PIPE_ALL>();
         }
     } else {
