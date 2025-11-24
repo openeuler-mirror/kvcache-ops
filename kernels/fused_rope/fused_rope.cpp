@@ -18,6 +18,7 @@ extern "C" __global__ __aicore__ void FusedRopeKernel(
     uint64_t numTokensFrontCoreLastLoop, uint64_t numTokensTailCoreLastLoop, uint64_t tilingKey)
 {
     TPipe pipe;
+#if (ASCEND_AICORE_ARCH >= 220)
     // DT_BF16
     if (tilingKey == (uint64_t)kvcache_ops::AscendType::BF16) {
         TPipe* ptr = &pipe;
@@ -35,6 +36,7 @@ extern "C" __global__ __aicore__ void FusedRopeKernel(
             op.Process();
         }
     }
+#endif
     // DT_FLOAT16
     if (tilingKey == (uint64_t)kvcache_ops::AscendType::FP16) {
         TPipe* ptr = &pipe;

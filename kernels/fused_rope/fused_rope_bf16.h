@@ -312,14 +312,26 @@ __aicore__ inline void FusedRopeFP16<T>::Rope(
                 this->rotaryDim);
             PipeBarrier<PIPE_V>();
         }
-        Cast(
-            inQueCalLocal, temp1Local, AscendC::RoundMode::CAST_RINT,
-            static_cast<uint16_t>(loopN * this->numHeads * this->rotaryDim));
+        #if ASCEND_AICORE_ARCH >= 220
+            Cast(
+                inQueCalLocal, temp1Local, AscendC::RoundMode::CAST_RINT,
+                static_cast<uint16_t>(loopN * this->numHeads * this->rotaryDim));
+        #else
+            Cast(
+                inQueCalLocal, temp1Local, AscendC::RoundMode::CAST_NONE,
+                static_cast<uint16_t>(loopN * this->numHeads * this->rotaryDim));
+        #endif
         PipeBarrier<PIPE_V>();
     } else {
-        Cast(
-            inQueCalLocal, inLocal, AscendC::RoundMode::CAST_RINT,
-            static_cast<uint16_t>(loopN * this->numHeads * this->rotaryDim));
+        #if ASCEND_AICORE_ARCH >= 220
+            Cast(
+                inQueCalLocal, inLocal, AscendC::RoundMode::CAST_RINT,
+                static_cast<uint16_t>(loopN * this->numHeads * this->rotaryDim));
+        #else
+            Cast(
+                inQueCalLocal, inLocal, AscendC::RoundMode::CAST_NONE,
+                static_cast<uint16_t>(loopN * this->numHeads * this->rotaryDim));
+        #endif
         PipeBarrier<PIPE_V>();
     }
 }
@@ -369,11 +381,11 @@ __aicore__ inline void FusedRopeFP16<T>::Compute(uint64_t index, uint64_t loopN)
         for (uint32_t i = 0; i < loopN * this->numHeads; i++) {
             GatherMask(
                 inLocal[i * this->rotaryDim], temp1Local[i * this->rotaryDim], static_cast<uint8_t>(1), true,
-                this->rotaryDim, {1, 1, 0, 0}, rsv);
+                this->rotaryDim, {1, 1, 8, 0}, rsv);
             PipeBarrier<PIPE_ALL>();
             GatherMask(
                 inLocal[i * this->rotaryDim + this->rotaryDim / 2], temp1Local[i * this->rotaryDim],
-                static_cast<uint8_t>(2), true, this->rotaryDim, {1, 1, 0, 0}, rsv);
+                static_cast<uint8_t>(2), true, this->rotaryDim, {1, 1, 8, 0}, rsv);
             PipeBarrier<PIPE_ALL>();
         }
     } else {
@@ -388,8 +400,8 @@ __aicore__ inline void FusedRopeFP16<T>::Compute(uint64_t index, uint64_t loopN)
                 inQueueCosSinCacheBeforeCastLocal, oldPositionIdGM, cosSinCacheGM,
                 dstShape, srcShape, dstShape4Negone);
     PipeBarrier<PIPE_V>();
-    Rope(index, loopN, inLocal, reverseQ, cosSin, oneNeg, inCosSin, 
-         inQueueCosSinCacheBeforeCastLocal, inQueCalLocal, temp1Local, offsetLocal, 
+    Rope(index, loopN, inLocal, reverseQ, cosSin, oneNeg, inCosSin,
+         inQueueCosSinCacheBeforeCastLocal, inQueCalLocal, temp1Local, offsetLocal,
          newPositionIdGM, cosSinCacheGM, dstShape, srcShape, dstShape4Negone);
     PipeBarrier<PIPE_V>();
 
