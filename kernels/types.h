@@ -25,4 +25,10 @@ enum struct AscendType {
     INT32 = 4,
     INT64 = 5,
 };
+
+enum struct KVCacheFormat : int {
+    UNDEFINED = 0,
+    MERGED_KV = 1,    // [2, num_blocks, block_size, num_heads, head_dim] eg: vllm0.9.2 
+    SEPARATE_KV = 2,  // tuple(K, V), k/v: [num_blocks, block_size, num_heads, head_dim] eg: vllm0.11.0 
+};
 }

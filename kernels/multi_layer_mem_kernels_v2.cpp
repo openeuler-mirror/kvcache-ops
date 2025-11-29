@@ -19,7 +19,7 @@
 #include <string>
 #include <stdexcept>
 
-template <typename scalar_t, typename slot_t> class MultiLayerPagedKVCopyV2 {
+template <typename scalar_t, typename slot_t, kvcache_ops::KVCacheFormat kvcache_fmt> class MultiLayerPagedKVCopyV2 {
     using local_scalar_t = AscendC::LocalTensor<scalar_t>;
 
 public:
@@ -50,14 +50,14 @@ public:
                                            __gm__ uint8_t *slotmappings, const int cacheIdx, 
                                            const int layerIdx, const int32_t startTokensIdx, 
                                            const int32_t endTokensIdx, 
-                                           const int32_t actualTokensPerInnerLoop) {
+                                           const int32_t actualTokensPerInnerLoop,
+                                           const int64_t pagedOffset) {
         // get the slotmappings 
         __gm__ slot_t *slotmappingPtr = reinterpret_cast<__gm__ slot_t*>(slotmappings);
         
         // 1. alloc per layer per loop cache buffer
         local_scalar_t perLayerSingleCacheBuffer = this->pagedTokenQue_.template AllocTensor<scalar_t>();
-        int64_t slot;
-        int64_t pagedOffset = cacheIdx * this->pageBuffSize_ * this->hiddenDims_;
+        int64_t slot;      
         int64_t tmpPagedOffset;
         int64_t localTensorTokenOffset;
         // 2. copy num tokens
@@ -88,7 +88,8 @@ public:
                                            __gm__ uint8_t *slotmappings, const int cacheIdx, 
                                            const int layerIdx, const int32_t startTokensIdx, 
                                            const int32_t endTokensIdx, 
-                                           const int32_t actualTokensPerInnerLoop) {
+                                           const int32_t actualTokensPerInnerLoop,
+                                           const int64_t pagedOffset) {
         // get the slotmappings 
         __gm__ slot_t *slotmappingPtr = reinterpret_cast<__gm__ slot_t*>(slotmappings);
         
@@ -109,7 +110,6 @@ public:
 
         // 4. now this is in ub
         int64_t slot;
-        int64_t pagedOffset = cacheIdx * this->pageBuffSize_ * this->hiddenDims_;
         int64_t tmpPagedOffset;
         int64_t localTensorTokenOffset;
         // copy per token into paged
@@ -135,7 +135,20 @@ public:
         __gm__ uint8_t * __gm__ *pagedKVCachesPtr = reinterpret_cast<__gm__ uint8_t* __gm__ *>(pagedKVCaches);
 
         // getting the right ptr to the paged kvcache layer
-        __gm__ uint8_t *pagedLayerKVCaches = pagedKVCachesPtr[layerIdx];
+        __gm__ uint8_t *pagedLayerKVCaches = nullptr;
+        int64_t pagedOffset = 0;
+
+        if constexpr (kvcache_fmt == kvcache_ops::KVCacheFormat::MERGED_KV) {
+            // vllm 0.9.2：One pointer per layer, pointing to [2, pages, page_size, ...]
+            pagedLayerKVCaches = pagedKVCachesPtr[layerIdx];
+            pagedOffset = cacheIdx * this->pageBuffSize_ * this->hiddenDims_;
+        } else if constexpr (kvcache_fmt == kvcache_ops::KVCacheFormat::SEPARATE_KV) {
+            // vllm 0.11.0：Two pointers per layer (Key and Value independent)
+            // Pointer array layout:[Layer0.Key, Layer0.Value, Layer1.Key, Layer1.Value, ...]
+            int layerKVIdx = layerIdx * 2 + cacheIdx;
+            pagedLayerKVCaches = pagedKVCachesPtr[layerKVIdx];
+            pagedOffset = 0;
+        }
         
         // For both page2L and L2Page, we copy per token via and to the pagedcache.
         this->pagedTokenGlobal_.SetGlobalBuffer(reinterpret_cast<__gm__ scalar_t*>(pagedLayerKVCaches),
@@ -157,9 +170,9 @@ public:
             actualTokensPerInnerLoop = endTokensIdx - startTokensIdx;
 
             if (page2L) {
-                this->_page2LTransfer(pagedKVCaches, cacheTensor, slotmappings, cacheIdx, layerIdx, startTokensIdx, endTokensIdx, actualTokensPerInnerLoop);
+                this->_page2LTransfer(pagedKVCaches, cacheTensor, slotmappings, cacheIdx, layerIdx, startTokensIdx, endTokensIdx, actualTokensPerInnerLoop, pagedOffset);
             } else {
-                this->_L2PageTransfer(pagedKVCaches, cacheTensor, slotmappings, cacheIdx, layerIdx, startTokensIdx, endTokensIdx, actualTokensPerInnerLoop);
+                this->_L2PageTransfer(pagedKVCaches, cacheTensor, slotmappings, cacheIdx, layerIdx, startTokensIdx, endTokensIdx, actualTokensPerInnerLoop, pagedOffset);
             }
         }
     }
@@ -182,15 +195,15 @@ private:
     bool page2L_; // true, from pagedTensor to LMC, false otherwise
 };
 
-#define MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_DECLARE(TYPE, SLOTTYPE)                                                      \
-        extern "C" __global__ __aicore__ void multi_layer_paged_kv_copy_v2_##TYPE##_##SLOTTYPE(                        \
+#define MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_KVCACHE_FMT_DECLARE(TYPE, SLOTTYPE, FMT)                                     \
+        extern "C" __global__ __aicore__ void multi_layer_paged_kv_copy_v2_##TYPE##_##SLOTTYPE##_##FMT(                \
         __gm__ uint8_t* pagedKVCaches, __gm__ uint8_t* dstCacheTensor, __gm__ uint8_t* slotmappings,                   \
         const int64_t hiddenDims, const int32_t kvs, const int32_t numLayers,                                          \
         const int64_t pageBuffSize, const int32_t numTokensChunk,                                                      \
         const int64_t perLoopBuffer, const int32_t maxTokensPerLoop, const bool page2L)                                \
     {                                                                                                                  \
         AscendC::TPipe pipe;                                                                                           \
-        MultiLayerPagedKVCopyV2<TYPE, SLOTTYPE> op{};                                                                  \
+        MultiLayerPagedKVCopyV2<TYPE, SLOTTYPE, kvcache_ops::KVCacheFormat::FMT> op{};                                 \
         int32_t bIdx = AscendC::GetBlockIdx();                                                                         \
         int32_t launchedCores = AscendC::GetBlockNum();                                                                \
         int32_t layersPerCore = (numLayers + launchedCores - 1) / launchedCores;                                       \
@@ -205,9 +218,14 @@ private:
         }                                                                                                              \
     }
 
-#define MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_SLOTTYPE_DECLARE(TYPE)   \
-    MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_DECLARE(TYPE, int32_t);      \
-    MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_DECLARE(TYPE, int64_t);
+#define MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_SLOTTYPE_FMT_DECLARE(TYPE, SLOTTYPE)             \
+    MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_KVCACHE_FMT_DECLARE(TYPE, SLOTTYPE, MERGED_KV);      \
+    MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_KVCACHE_FMT_DECLARE(TYPE, SLOTTYPE, SEPARATE_KV);
+
+#define MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_SLOTTYPE_DECLARE(TYPE)                           \
+    MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_SLOTTYPE_FMT_DECLARE(TYPE, int32_t);                 \
+    MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_SLOTTYPE_FMT_DECLARE(TYPE, int64_t);
+
 
 // Declare support kernel entry in the device side
 MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_SLOTTYPE_DECLARE(half);
@@ -219,28 +237,38 @@ MULTI_LAYER_PAGED_KV_COPY_V2_TYPE_SLOTTYPE_DECLARE(bfloat16_t);
 
 namespace kvcache_ops {
 
-#define MULTI_LAYER_PAGED_KV_COPY_V2_KERNEL_CALL(TYPE, SLOTTYPE)                                                          \
-    multi_layer_paged_kv_copy_v2_##TYPE##_##SLOTTYPE<<<blockDim, nullptr, stream>>>(pagedKVCaches, dstCacheTensor,        \
-                                                                                 slotmappings, hiddenDims, kvs,           \
-                                                                                 numLayers, pageBuffSize,                 \
-                                                                                 numTokensChunk, perLoopBuffer,           \
+#define MULTI_LAYER_PAGED_KV_COPY_V2_KERNEL_CALL(TYPE, SLOTTYPE, FMT)                                                             \
+    multi_layer_paged_kv_copy_v2_##TYPE##_##SLOTTYPE##_##FMT<<<blockDim, nullptr, stream>>>(pagedKVCaches, dstCacheTensor,        \
+                                                                                 slotmappings, hiddenDims, kvs,                   \
+                                                                                 numLayers, pageBuffSize,                         \
+                                                                                 numTokensChunk, perLoopBuffer,                   \
                                                                                  maxTokensPerLoop, page2L);
 
 template<typename T, typename SlotT>
-void multi_layer_paged_kernel_v2(uint32_t blockDim, void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, 
+void multi_layer_paged_kernel_v2(kvcache_ops::KVCacheFormat kvcacheFormat, uint32_t blockDim, void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, 
                   uint8_t *slotmappings, const int64_t hiddenDims, const int32_t kvs, const int32_t numLayers, 
                   const int64_t pageBuffSize, const int32_t numTokensChunk, const int64_t perLoopBuffer, 
                   const int32_t maxTokensPerLoop, const bool page2L);
 
-#define MULTI_LAYER_PAGED_KERNEL_CALL_V2_TYPE_DECLARE(TYPE, SLOTTYPE)                                                     \
-template<>                                                                                                                \
-void multi_layer_paged_kernel_v2<TYPE, SLOTTYPE>(uint32_t blockDim, void *stream, uint8_t *pagedKVCaches,                 \
-                                              uint8_t *dstCacheTensor, uint8_t *slotmappings,                             \
-                                              const int64_t hiddenDims, const int32_t kvs, const int32_t numLayers,       \
-                                              const int64_t pageBuffSize, const int32_t numTokensChunk,                   \
-                                              const int64_t perLoopBuffer, const int32_t maxTokensPerLoop,                \
-                                              const bool page2L){                                                         \
-    MULTI_LAYER_PAGED_KV_COPY_V2_KERNEL_CALL(TYPE, SLOTTYPE);                                                             \
+#define MULTI_LAYER_PAGED_KERNEL_CALL_V2_TYPE_DECLARE(TYPE, SLOTTYPE)                                                             \
+template<>                                                                                                                        \
+void multi_layer_paged_kernel_v2<TYPE, SLOTTYPE>(kvcache_ops::KVCacheFormat kvcacheFormat, uint32_t blockDim, void *stream,       \
+                                                 uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, uint8_t *slotmappings,          \
+                                                 const int64_t hiddenDims, const int32_t kvs, const int32_t numLayers,            \
+                                                 const int64_t pageBuffSize, const int32_t numTokensChunk,                        \
+                                                 const int64_t perLoopBuffer, const int32_t maxTokensPerLoop,                     \
+                                                 const bool page2L){                                                              \
+    switch (kvcacheFormat) {                                                                                                      \
+        case kvcache_ops::KVCacheFormat::MERGED_KV:                                                                               \
+            MULTI_LAYER_PAGED_KV_COPY_V2_KERNEL_CALL(TYPE, SLOTTYPE, MERGED_KV);                                                  \
+            break;                                                                                                                \
+        case kvcache_ops::KVCacheFormat::SEPARATE_KV:                                                                             \
+            MULTI_LAYER_PAGED_KV_COPY_V2_KERNEL_CALL(TYPE, SLOTTYPE, SEPARATE_KV);                                                \
+            break;                                                                                                                \
+        default:                                                                                                                  \
+            ASCENDC_REPORT_NOT_SUPPORT(false, "Unsupported KVCacheFormat.");                                                      \
+            break;                                                                                                                \
+    }                                                                                                                             \
 }
 
 #define MULTI_LAYER_PAGED_KERNEL_CALL_V2_TYPE_SLOTTYPE_DECLARE(TYPE)  \
@@ -255,19 +283,18 @@ MULTI_LAYER_PAGED_KERNEL_CALL_V2_TYPE_SLOTTYPE_DECLARE(bfloat16_t);
 #endif
 
 template<typename T>
-void dispatch_paged_kernel_on_slot_type_v2(kvcache_ops::AscendType slotType, uint32_t blockDim, void *stream,
-                                        uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, uint8_t *slotmappings, 
-                                        const int64_t hiddenDims, const int32_t kvs, const int32_t numLayers,         
-                                        const int64_t pageBuffSize, const int32_t numTokensChunk, 
-                                        const int64_t perLoopBuffer, const int32_t maxTokensPerLoop, 
-                                        const bool page2L) {
+void dispatch_paged_kernel_on_slot_type_v2(kvcache_ops::AscendType slotType, kvcache_ops::KVCacheFormat kvcacheFormat,
+                                        uint32_t blockDim, void *stream, uint8_t *pagedKVCaches,uint8_t *dstCacheTensor,
+                                        uint8_t *slotmappings, const int64_t hiddenDims, const int32_t kvs,
+                                        const int32_t numLayers,const int64_t pageBuffSize, const int32_t numTokensChunk,        
+                                         const int64_t perLoopBuffer, const int32_t maxTokensPerLoop,const bool page2L) {
     switch(slotType) {
         case kvcache_ops::AscendType::INT32:
-            multi_layer_paged_kernel_v2<T, int32_t>(blockDim, stream, pagedKVCaches, dstCacheTensor, slotmappings,
+            multi_layer_paged_kernel_v2<T, int32_t>(kvcacheFormat, blockDim, stream, pagedKVCaches, dstCacheTensor, slotmappings,
                                      hiddenDims, kvs, numLayers, pageBuffSize, numTokensChunk, perLoopBuffer, maxTokensPerLoop, page2L);
             break;
         case kvcache_ops::AscendType::INT64:
-            multi_layer_paged_kernel_v2<T, int64_t>(blockDim, stream, pagedKVCaches, dstCacheTensor, slotmappings,
+            multi_layer_paged_kernel_v2<T, int64_t>(kvcacheFormat, blockDim, stream, pagedKVCaches, dstCacheTensor, slotmappings,
                                      hiddenDims, kvs, numLayers, pageBuffSize, numTokensChunk,  perLoopBuffer, maxTokensPerLoop, page2L);
             break;
         default:
@@ -277,8 +304,8 @@ void dispatch_paged_kernel_on_slot_type_v2(kvcache_ops::AscendType slotType, uin
 }
 
 extern void multi_layer_kv_transfer_kernel_v2(kvcache_ops::AscendType type, kvcache_ops::AscendType slotType, 
-                                              uint32_t blockDim, void *stream, uint8_t *pagedKVCaches, 
-                                              uint8_t *dstCacheTensor, uint8_t *slotmappings, 
+                                              const kvcache_ops::KVCacheFormat kvcacheFormat,uint32_t blockDim, void *stream,
+                                              uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, uint8_t *slotmappings, 
                                               const int64_t hiddenDims, const int32_t kvs, const int32_t numLayers, 
                                               const int64_t pageBuffSize, const int32_t numTokensChunk, 
                                               const int64_t perLoopBuffer, const int32_t maxTokensPerLoop,
@@ -286,19 +313,19 @@ extern void multi_layer_kv_transfer_kernel_v2(kvcache_ops::AscendType type, kvca
 {
     switch(type) {
         case kvcache_ops::AscendType::FP16:
-            dispatch_paged_kernel_on_slot_type_v2<half>(slotType, blockDim, stream, pagedKVCaches, dstCacheTensor, 
+            dispatch_paged_kernel_on_slot_type_v2<half>(slotType, kvcacheFormat, blockDim, stream, pagedKVCaches, dstCacheTensor, 
                                                      slotmappings, hiddenDims, kvs, numLayers, pageBuffSize, 
                                                      numTokensChunk, perLoopBuffer, maxTokensPerLoop, page2L);
             break;
 #if (ASCEND_AICORE_ARCH >= 220)
         case kvcache_ops::AscendType::BF16:
-            dispatch_paged_kernel_on_slot_type_v2<bfloat16_t>(slotType, blockDim, stream, pagedKVCaches, dstCacheTensor, 
+            dispatch_paged_kernel_on_slot_type_v2<bfloat16_t>(slotType, kvcacheFormat, blockDim, stream, pagedKVCaches, dstCacheTensor, 
                                                            slotmappings, hiddenDims, kvs, numLayers, pageBuffSize, 
                                                            numTokensChunk, perLoopBuffer, maxTokensPerLoop, page2L);
             break;
 #endif
         case kvcache_ops::AscendType::INT8:
-            dispatch_paged_kernel_on_slot_type_v2<int8_t>(slotType, blockDim, stream, pagedKVCaches, dstCacheTensor, 
+            dispatch_paged_kernel_on_slot_type_v2<int8_t>(slotType, kvcacheFormat, blockDim, stream, pagedKVCaches, dstCacheTensor, 
                                                         slotmappings, hiddenDims, kvs, numLayers, pageBuffSize, 
                                                         numTokensChunk, perLoopBuffer, maxTokensPerLoop, page2L);
             break;

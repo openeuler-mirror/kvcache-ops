@@ -8,6 +8,37 @@ else()
 endif()
 include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
 
+function(detect_cann_version)
+    set(CANN_VERSION "0.0")
+    
+    # Extract the version number from version.cfg (format: [8.3.0.1.200:8.3.RC1])
+    set(VERSION_CFG "${ASCEND_CANN_PACKAGE_PATH}/version.cfg")
+    if(EXISTS "${VERSION_CFG}")
+        file(READ "${VERSION_CFG}" CONTENT)
+        string(REGEX MATCH ":([0-9]+)\\.([0-9]+)" MATCH_RESULT "${CONTENT}")
+        if(CMAKE_MATCH_1 AND CMAKE_MATCH_2)
+            set(CANN_VERSION "${CMAKE_MATCH_1}.${CMAKE_MATCH_2}")
+        endif()
+    endif()
+    
+    # Parsing cann version from the installation path
+    if(CANN_VERSION STREQUAL "0.0")
+        get_filename_component(REAL_PATH "${ASCEND_CANN_PACKAGE_PATH}" REALPATH)
+        string(REGEX MATCH "([0-9]+)\\.([0-9]+)" CANN_VERSION "${REAL_PATH}")
+    endif()
+
+    if(CANN_VERSION VERSION_GREATER_EQUAL "8.3")
+        set(CANN_IS_83 TRUE)
+    else()
+        set(CANN_IS_83 FALSE)
+    endif()
+    
+    set(CANN_VERSION "${CANN_VERSION}" PARENT_SCOPE)
+    set(CANN_IS_83 "${CANN_IS_83}" PARENT_SCOPE)
+    
+    message(STATUS "CANN Version: ${CANN_VERSION}")
+endfunction()
+
 # this is adopted and modified from the above ascendc.cmake
 # the main issue stems from our kernels host compilation part should also be notified from custom macro and compile definition
 function(ascendc_library_with_def target_name target_type)
@@ -39,6 +70,22 @@ function(ascendc_library_with_def target_name target_type)
     add_library(${target_name}_interface STATIC EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_BINARY_DIR}/${target_name}_stub.cpp
     )
+
+    # Modify AIC_BUILD_MODE/AIV_BUILD_MODE according to the cann version.
+    detect_cann_version()
+    if(CANN_IS_83)
+        # CANN 8.3+： AIC_BUILD_MODE : ${BUILD_MODE}_aic
+        set(AIC_BUILD_MODE "${BUILD_MODE}_aic")
+        set(AIV_BUILD_MODE "${BUILD_MODE}_aiv")
+        message(STATUS "Using CANN 8.3+ mode: ${AIC_BUILD_MODE}")
+        message(STATUS "Using CANN 8.3+ mode: ${AIV_BUILD_MODE}")
+    else()
+        # CANN 8.2： AIC_BUILD_MODE : aic
+        set(AIC_BUILD_MODE "aic")
+        set(AIV_BUILD_MODE "aiv")
+        message(STATUS "Using CANN 8.2 mode: ${AIC_BUILD_MODE}")
+        message(STATUS "Using CANN 8.2 mode: ${AIV_BUILD_MODE}")
+    endif()
 
     ExternalProject_Add(${device_target}_precompile
                         SOURCE_DIR ${ASCENDC_KERNEL_CMAKE_DIR}/device_precompile_project
@@ -99,7 +146,7 @@ function(ascendc_library_with_def target_name target_type)
                             SOURCE_DIR ${ASCENDC_KERNEL_CMAKE_DIR}/device_project
                             CONFIGURE_COMMAND  ${CMAKE_COMMAND}
                                 -G ${CMAKE_GENERATOR}
-                                -DBUILD_MODE=aic
+                                -DBUILD_MODE=${AIC_BUILD_MODE}
                                 -DASCENDC_KERNEL_CMAKE_DIR=${ASCENDC_KERNEL_CMAKE_DIR}
                                 -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
                                 -DOPTIONS=$<TARGET_PROPERTY:${target_name}_interface,OPTIONS>
@@ -123,7 +170,7 @@ function(ascendc_library_with_def target_name target_type)
                             SOURCE_DIR ${ASCENDC_KERNEL_CMAKE_DIR}/device_project
                             CONFIGURE_COMMAND  ${CMAKE_COMMAND}
                                 -G ${CMAKE_GENERATOR}
-                                -DBUILD_MODE=aiv
+                                -DBUILD_MODE=${AIV_BUILD_MODE}
                                 -DASCENDC_KERNEL_CMAKE_DIR=${ASCENDC_KERNEL_CMAKE_DIR}
                                 -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
                                 -DOPTIONS=$<TARGET_PROPERTY:${target_name}_interface,OPTIONS>
