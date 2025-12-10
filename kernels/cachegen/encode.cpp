@@ -23,7 +23,7 @@ public:
         GM_ADDR output_data_ptr, // Output bytes [n_layers, n_channels, batch_size], uint8
         GM_ADDR output_lengths_data_ptr, // Output bytes [n_layers, n_channels], uint32
         AscendC::TPipe& pipe,
-        int32_t n_tokens,
+        int32_t n_tokens, // Chunked at a higher level limiting the input size
         int32_t n_layers,
         int32_t n_channels,
         uint32_t n_bins,
@@ -32,13 +32,9 @@ public:
     __aicore__ inline void encode(int layer_id, int channel_id);
 
 private:
-    // CDF [n_layers, n_channels, n_bins + 1]
     AscendC::GlobalTensor<uint16_t> gm_cdf;
-    // Input symbols [n_layers, n_tokens, n_channels]
     AscendC::GlobalTensor<uint8_t> gm_input;
-    // Output bytes [n_layers, n_channels, batch_size]
     AscendC::GlobalTensor<uint8_t> gm_output;
-    // Output byte lengths [n_layers, n_channels]
     AscendC::GlobalTensor<uint32_t> gm_output_lens;
 
     AscendC::TPipe& pipe;
@@ -48,11 +44,12 @@ private:
     AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQ;
 
     AscendC::TBuf<AscendC::TPosition::VECCALC> calcBuf;
-    AscendC::LocalTensor<uint8_t> calc_sym_input; // [batch_size]
+    // Local Symbols - [layer, :, channel], where the size is bound by n_tokens (chunked at a higher level so ~256 typically) 
+    AscendC::LocalTensor<uint8_t> calc_sym_input; // [ceil_32(n_tokens)]
 
     AscendC::TBuf<AscendC::TPosition::VECOUT> outBuf;
     // scalar -> GM requires careful DCache handling while scalar -> MTE_3 -> GM is the paved path in AscendC. Have a 
-    // tensor for the purpose of carrying the encoded length to output via this paved path.
+    // tensor for the purpose of carrying an encoded length to output via this paved path.
     AscendC::LocalTensor<uint32_t> ub_encoded_output_len; // [1]
 
     // Input dimensions
@@ -92,6 +89,7 @@ private:
         AscendC::LocalTensor<uint8_t> encoded_output,
         uint32_t& encoded_output_write_head);
 
+    // Populate the local symbol tensor with [layer, :, channel]
     __aicore__ inline void copy_in(int layer_id, int channel_id);
     __aicore__ inline void copy_in_enq(int layer_offset, int chunk_id, uint32_t copy_volume);
     __aicore__ inline void copy_in_deq(uint32_t read_offset, uint32_t& write_offset, uint32_t n_to_gather);
@@ -125,7 +123,7 @@ __aicore__ inline Encoder::Encoder(
     copy_volume = n_channels * n_tokens;
     tokens_per_chunk = (1 << 15) / n_channels; // Implies a maximum supported channel size (of around 3200) 
     full_chunk_volume = tokens_per_chunk * n_channels;
-    max_full_chunk_id = copy_volume / full_chunk_volume ;
+    max_full_chunk_id = copy_volume / full_chunk_volume;
     tail_chunk_size = copy_volume % full_chunk_volume;
     tokens_in_tail = tail_chunk_size / n_channels;
     has_tail_chunk = tail_chunk_size != 0;
@@ -200,7 +198,6 @@ __aicore__ inline void Encoder::copy_in_deq(uint32_t read_offset, uint32_t& writ
 
 __aicore__ inline void Encoder::encode(int layer_id, int channel_id) {
     copy_in(layer_id, channel_id);
-
     AscendC::LocalTensor<uint16_t> ub_cdf_input = CDFInQ.DeQue<uint16_t>();
 
     AscendC::LocalTensor<uint8_t> encoded_output = outQ.AllocTensor<uint8_t>();
@@ -219,7 +216,7 @@ __aicore__ inline void Encoder::encode(int layer_id, int channel_id) {
     //
     // Encode throughput is scalar bound, and this loop with the inner `while(true)` is the bulk of that work.
     // There are possibilities to vecotize over multiple channels at once and/or to replace the inner while loop with
-    // with bitwise comparisons of high and low.
+    // with bitwise comparisons of high and low (see decode).
     //
     // Currently, the kernel isn't the overall encode bottleneck, but if that changes this is the main opportunity for 
     // optimization.
@@ -345,7 +342,7 @@ __aicore__ inline void Encoder::spill_partial_reg_to_shared(
 } // namespace cachegen
 } // namespace kvcache_ops
 
-extern "C" __global__ __aicore__ void encode__kernel (
+extern "C" __global__ __aicore__ void encode_kernel (
     GM_ADDR cdf_data_ptr,
     GM_ADDR input_data_ptr,
     GM_ADDR output_data_ptr,
@@ -400,7 +397,7 @@ void encode(
 
     int blockDim = n_layers * n_channels < n_aiv ? n_layers * n_channels : n_aiv;
 
-    encode__kernel<<<blockDim, nullptr, stream>>>(
+    encode_kernel<<<blockDim, nullptr, stream>>>(
         cdf_data_ptr,
         input_data_ptr,
         output_data_ptr,

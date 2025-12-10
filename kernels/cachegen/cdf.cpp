@@ -17,11 +17,11 @@ public:
         GM_ADDR input, // Input symbols [n_layers, n_tokens, n_channels], uint8
         GM_ADDR output, // Output CDF [n_layers, n_channels, n_bins + 1], uint16
         AscendC::TPipe& pipe,
-        int32_t n_tokens,
+        int32_t n_tokens, // Chunked at a higher level limiting the input size
         int32_t n_layers,
         int32_t n_channels,
         uint32_t n_bins,
-        float scale_factor); // Factor to convert a tally to a frequency distributed over the desired range 
+        float scale_factor); // Factor to convert a tally to a frequency distributed over the desired range
 
     __aicore__ inline void run(int layer_id, int channel_id);
 
@@ -48,8 +48,9 @@ private:
     int32_t n_channels;
     uint32_t n_bins;
 
-    // Rescales tally over [0, U16_MAX - n_bins) leaving headroom for a tie break. Typically (U16_MAX - n_bins) / n_tokens,
-    // the calculation of the scale factor is easiest to do on the cpu so taken as input.
+    // Rescales tally over [0, U16_MAX - n_bins) leaving headroom for a tie break. Typically (U16_MAX - n_bins) / n_tokens.
+    // Calculation of the scale factor is easiest to do on the cpu where there are fewer type limitations, so taken as 
+    // a class input.
     float scale_factor; 
 
     // Derived values - the input dimensions dictate the number of symbols that are copied in each pass etc. Stored here
@@ -62,7 +63,9 @@ private:
 
     // Compute the tally, storing the result in the approprate Calc buffer
     __aicore__ inline void tally(int layer_id, int channel_id);
+
     __aicore__ inline void copy_in_enq(int layer_offset, int chunk_id, uint32_t copy_volume);
+
     __aicore__ inline void deq_count(int32_t* count, uint32_t& token_idx, uint32_t copy_count);
 
     // Convert the tally into the desired CDF, storing the result in the approprate Calc buffer
@@ -216,7 +219,7 @@ __aicore__ inline void CdfCalulator::tally_to_cdf() {
 } // namespace cachegen
 } // namespace kvcache_ops
 
-extern "C" __global__ __aicore__ void calculate_cdf__kernel (
+extern "C" __global__ __aicore__ void calculate_cdf_kernel (
     GM_ADDR input,
     GM_ADDR output,
     const int n_tokens,
@@ -264,7 +267,7 @@ void calculate_cdf(
     float scale_factor = static_cast<float>(0xFFFF - n_bins - 1) / static_cast<float>(n_tokens);
     int blockDim = n_layers * n_channels < n_aiv ? n_layers * n_channels : n_aiv;
 
-    calculate_cdf__kernel<<<blockDim, nullptr, stream>>>(
+    calculate_cdf_kernel<<<blockDim, nullptr, stream>>>(
         input,
         output,
         n_tokens,
