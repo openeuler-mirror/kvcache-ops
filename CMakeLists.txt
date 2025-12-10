@@ -4,6 +4,7 @@ message(STATUS "Detected SOC version: ${SOC_VERSION}")
 
 file(GLOB KERNEL_FILES 
   kernels/*.cpp
+  kernels/cachegen/*.cpp
   kernels/fused_rope/*.cpp
   kernels/single_layer/*.cpp
   kernels/multi_layer/*.cpp
