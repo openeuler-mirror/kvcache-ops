@@ -15,7 +15,7 @@
  */
 #include "kernel_operator.h"
 #include <stdio.h>
-#include "types.h"
+#include "../types.h"
 #include <string>
 #include <stdexcept>
 
