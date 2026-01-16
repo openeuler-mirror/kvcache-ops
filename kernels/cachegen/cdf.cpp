@@ -1,5 +1,4 @@
 #include "kernel_operator.h"
-#include "cachegen_kernels.h"
 #include <cstring>
 #include <stdexcept>
 
@@ -99,6 +98,7 @@ __aicore__ inline CdfCalulator::CdfCalulator(
 
     // Inner per layer chunking variables
     copy_volume = n_channels * n_tokens;
+    // TODO: Size of copy should be dictated by the UB size, rather than statically set
     full_chunk_volume = 1 << 15; // 2^14 == 16,384
     max_full_chunk_id = copy_volume >> 15;
     tail_chunk_size = copy_volume & ((1 << 15) - 1);
@@ -202,7 +202,8 @@ __aicore__ inline void CdfCalulator::deq_count(int32_t* count, uint32_t& token_i
 }
 
 __aicore__ inline void CdfCalulator::tally_to_cdf() {
-    // Up to ~16M tokens before this cast becomes lossy
+    // To make use of AscendC::Muls, cast to float. The counts being cast can comfortably be exactly represented as
+    // floats - this cast safe
     AscendC::Cast(ub_cdf_calc_f, ub_cdf_calc_i32, AscendC::RoundMode::CAST_NONE, n_bins + 1);
     // Covert the tally to a normalized frequency
     AscendC::Muls(ub_cdf_calc_f, ub_cdf_calc_f, scale_factor, n_bins + 1);

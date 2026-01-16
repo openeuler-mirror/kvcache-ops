@@ -1,5 +1,4 @@
 #include "kernel_operator.h"
-#include "cachegen_kernels.h"
 #include <cstring>
 #include <stdexcept>
 
@@ -121,6 +120,7 @@ __aicore__ inline Encoder::Encoder(
 
     // Internal chunking to handle larger input. Distinct from outer chunking 
     copy_volume = n_channels * n_tokens;
+    // TODO: Size of copy should be dictated by the UB size, rather than statically set
     tokens_per_chunk = (1 << 15) / n_channels; // Implies a maximum supported channel size (of around 3200) 
     full_chunk_volume = tokens_per_chunk * n_channels;
     max_full_chunk_id = copy_volume / full_chunk_volume;
