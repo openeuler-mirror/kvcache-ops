@@ -33,6 +33,8 @@ public:
 
     __aicore__ inline void decode(int layer_id, int channel_id);
 
+    const static uint32_t CHANNELS_PER_DECODE = 32;
+
 private:
     int64_t cycles[32] = {0};
     AscendC::GlobalTensor<uint16_t> gm_cdf;
@@ -45,8 +47,6 @@ private:
     AscendC::TQue<AscendC::TPosition::VECIN, 1> streamInQ;
     AscendC::TQue<AscendC::TPosition::VECIN, 1> CDFInQ;
     AscendC::TQue<AscendC::TPosition::VECOUT, 1> outQ;
-
-    const static uint32_t CHANNELS_PER_DECODE = 32;
 
     // Input dimensions
     int32_t n_tokens;
@@ -428,11 +428,11 @@ extern "C" __global__ __aicore__ void decode_kernel (
         n_channels,
         n_bins};
 
-    auto work_max_id = n_layers * n_channels / CHANNELS_PER_DECODE;
+    auto work_max_id = n_layers * n_channels / kvcache_ops::cachegen::impl::Decoder::CHANNELS_PER_DECODE;
 
     for (auto work_id = coreIdx; work_id < work_max_id; work_id += launchedCores) {
         int layer_id = work_id % n_layers ;
-        int channel_start_id = CHANNELS_PER_DECODE * (work_id / n_layers);
+        int channel_start_id = kvcache_ops::cachegen::impl::Decoder::CHANNELS_PER_DECODE * (work_id / n_layers);
         decoder.decode(layer_id, channel_start_id);
     }
 }

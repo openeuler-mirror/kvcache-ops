@@ -210,10 +210,59 @@ __aicore__ inline void CdfCalulator::tally_to_cdf() {
     AscendC::Cast(ub_cdf_calc_i32, ub_cdf_calc_f, AscendC::RoundMode::CAST_FLOOR, n_bins + 1);
     // Break ties in the histogram with a linear mask
     AscendC::Add(ub_cdf_calc_i32, ub_cdf_calc_i32, ub_linear_filter, n_bins + 1);
+    AscendC::ShiftLeft(ub_cdf_calc_i32, ub_cdf_calc_i32, 8, n_bins + 1);
 
     AscendC::LocalTensor<uint16_t> ub_output_hist = outQ.AllocTensor<uint16_t>();
     // Cast to u16 not supported so, as a work around, gather the relevant bits from the Reinterpreted i32 
     AscendC::Gather(ub_output_hist, ub_cdf_calc_i32_as_u16, ub_gather_every_other_filter.ReinterpretCast<uint32_t>(), 0, n_bins + 1);
+
+    // Run a mock encoding of each symbol so that the length of encodes can be smuggled in the lower bits of the CDF.
+    //
+    // Find the longest span that fits within a CDF bucket. Once determined, any unused bit allocation can be passed
+    // to improve encode efficiency
+    uint8_t lens[64] {0};
+    const int max_symbol = n_bins -1;
+    for (uint8_t mock_sym = 0; mock_sym < n_bins; mock_sym++) {
+        const uint16_t c_low = ub_output_hist(mock_sym);
+        const uint16_t c_high = mock_sym == max_symbol ? 0xFF00U : ub_output_hist(mock_sym + 1);
+
+        // Find the first bit set in high but not in low
+        uint16_t next_pos = AscendC::ScalarCountLeadingZero(static_cast<uint64_t>(c_high & (~c_low))) - 47;
+        uint8_t len_base = static_cast<uint8_t>(next_pos);
+
+        uint16_t base_encode = c_low;
+        base_encode = (base_encode >> (16 - len_base)) << (16 - len_base);
+
+        // Propose two encodings and determine which unambiguously (no matter what is appended) identifies the symbol
+        uint16_t upper = base_encode + ((1 << (16 - len_base))); // 0x b1 b2 .. b_len(1) 0 0 0 0
+        uint16_t lower = upper - 1; // 0x b1 b2 .. b_len(0) 1 1 1 1
+
+        // first 1 in high not in upper. Crop here and upper is guaranteed less than high 
+        uint8_t len_break_upper = AscendC::ScalarCountLeadingZero(static_cast<uint64_t>(c_high & ~upper)) - 47; 
+        // first 1 in lower not in low. Crop here and lower is guaranteed greater than high
+         uint8_t len_break_lower = AscendC::ScalarCountLeadingZero(static_cast<uint64_t>(lower & ~c_low)) - 47;
+
+        if (mock_sym == 0 || len_break_lower >= lens[mock_sym - 1]) {
+            // No need to append that last 1 as we know that all remaining digits (in binary) are 0 so anything appended
+            // will result in a val greater than or equal to the lower bound
+            len_break_lower -= 1;
+        }
+
+        if (len_break_upper < len_break_lower) {
+            lens[mock_sym] = len_break_upper;
+        } else {
+            lens[mock_sym] = len_break_lower;
+        }
+
+        uint16_t c_high_mask;
+        c_high_mask = ((1 << lens[mock_sym]) - 1) << (16 - lens[mock_sym]);
+        ub_output_hist.SetValue(mock_sym + 1, (c_high & c_high_mask));
+    }
+
+    for (uint8_t mock_sym = 0; mock_sym < n_bins; mock_sym++) {
+        ub_output_hist.SetValue(mock_sym + 1, ub_output_hist(mock_sym + 1) | lens[mock_sym]);
+    }
+
     outQ.EnQue(ub_output_hist);
 }
 } // namespace impl
@@ -265,7 +314,10 @@ void calculate_cdf(
     const int n_layers, 
     const int n_channels) {
 
-    float scale_factor = static_cast<float>(0xFFFF - n_bins - 1) / static_cast<float>(n_tokens);
+    // Dedicate 8 bits to the cdf, one to signal if the most favourable encode is upper or lower aligned, and 5 bits to the encode length
+    // Scale to 255 => longest encode will be 8
+    float scale_factor = static_cast<float>(0x00FF - n_bins - 1) / static_cast<float>(n_tokens);
+
     int blockDim = n_layers * n_channels < n_aiv ? n_layers * n_channels : n_aiv;
 
     calculate_cdf_kernel<<<blockDim, nullptr, stream>>>(
