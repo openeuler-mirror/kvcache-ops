@@ -14,9 +14,9 @@ __aicore__ inline auto big_to_small(uint32_t value) -> uint32_t {
     return ((value & 0xFF000000U) >> 24) | ((value & 0x00FF0000U) >> 8) | ((value & 0x0000FF00U) << 8) | ((value & 0x000000FFU) << 24);
 }
 
-class Encoder {
+class EncoderAsc {
 public:
-    __aicore__ inline Encoder(
+    __aicore__ inline EncoderAsc(
         GM_ADDR cdf_data_ptr, // Input CDF [n_layers, n_channels, n_bins + 1], uint16
         GM_ADDR input_data_ptr, // Input symbols [n_layers, n_tokens, n_channels], uint8
         GM_ADDR output_data_ptr, // Output bytes [n_layers, n_channels, batch_size], uint8
@@ -94,13 +94,13 @@ private:
     __aicore__ inline void copy_in_deq(uint32_t read_offset, uint32_t& write_offset, uint32_t n_to_gather);
 
     // Class has no known need to support move or copy operations
-    Encoder(const Encoder&) = delete;
-    Encoder& operator=(const Encoder&) = delete;
-    Encoder(Encoder&&) = delete;
-    Encoder& operator=(Encoder&&) = delete;
+    EncoderAsc(const EncoderAsc&) = delete;
+    EncoderAsc& operator=(const EncoderAsc&) = delete;
+    EncoderAsc(EncoderAsc&&) = delete;
+    EncoderAsc& operator=(EncoderAsc&&) = delete;
 };
 
-__aicore__ inline Encoder::Encoder(
+__aicore__ inline EncoderAsc::EncoderAsc(
     GM_ADDR cdf_data_ptr,
     GM_ADDR input_data_ptr,
     GM_ADDR output_data_ptr,
@@ -152,7 +152,7 @@ __aicore__ inline Encoder::Encoder(
     out_buf_offset += ceil_32(sizeof(uint32_t) * 1);
 }
 
-__aicore__ inline void Encoder::copy_in(int layer_id, int channel_id) {
+__aicore__ inline void EncoderAsc::copy_in(int layer_id, int channel_id) {
     auto layer_offset = layer_id * n_channels * n_tokens;
     uint32_t write_offset = 0;
     uint32_t read_offset = channel_id;
@@ -178,7 +178,7 @@ __aicore__ inline void Encoder::copy_in(int layer_id, int channel_id) {
     CDFInQ.EnQue(ub_cdf_input);
 }
 
-__aicore__ inline void Encoder::copy_in_enq(int layer_offset, int chunk_id, uint32_t copy_volume) {
+__aicore__ inline void EncoderAsc::copy_in_enq(int layer_offset, int chunk_id, uint32_t copy_volume) {
     AscendC::LocalTensor<uint8_t> ub_sym_input = symInQ.AllocTensor<uint8_t>();
     const AscendC::DataCopyExtParams copyParams = {1, (uint32_t)(copy_volume), 0, 0, 0};
     AscendC::DataCopyPadExtParams<uint8_t> padParams = {false, 0, 0, 0};
@@ -186,7 +186,7 @@ __aicore__ inline void Encoder::copy_in_enq(int layer_offset, int chunk_id, uint
     symInQ.EnQue(ub_sym_input);
 }
 
-__aicore__ inline void Encoder::copy_in_deq(uint32_t read_offset, uint32_t& write_offset, uint32_t n_to_gather) {
+__aicore__ inline void EncoderAsc::copy_in_deq(uint32_t read_offset, uint32_t& write_offset, uint32_t n_to_gather) {
     AscendC::LocalTensor<uint8_t> ub_sym_input = symInQ.DeQue<uint8_t>();
     for (auto ii = 0; ii < n_to_gather; ++ii) {
         calc_sym_input.SetValue(write_offset + ii, ub_sym_input(read_offset));
@@ -196,69 +196,66 @@ __aicore__ inline void Encoder::copy_in_deq(uint32_t read_offset, uint32_t& writ
     symInQ.FreeTensor(ub_sym_input); 
 }
 
-__aicore__ inline void Encoder::encode(int layer_id, int channel_id) {
+__aicore__ inline void EncoderAsc::encode(int layer_id, int channel_id) {
     copy_in(layer_id, channel_id);
     AscendC::LocalTensor<uint16_t> ub_cdf_input = CDFInQ.DeQue<uint16_t>();
 
     AscendC::LocalTensor<uint8_t> encoded_output = outQ.AllocTensor<uint8_t>();
     uint32_t encoded_output_write_head = 0;
 
-    // This calculation is inherently autoregressive in that encoding token N needs the state output from encoding
-    // token N-1
-    uint32_t low = 0U;
-    uint32_t high = 0xFFFFFFFFU;
-    uint64_t pending_bits = 0;
+    uint16_t encodes[64] {0};
+    uint8_t lens[64] {0};
     const int max_symbol = n_bins -1;
-    uint32_t output_reg = 0;
-    uint32_t output_reg_write_head = 0;
 
-    // OPTIMIZATION OPPORTUNITY
-    //
-    // Encode throughput is scalar bound, and this loop with the inner `while(true)` is the bulk of that work.
-    // There are possibilities to vecotize over multiple channels at once and/or to replace the inner while loop with
-    // with bitwise comparisons of high and low (see decode).
-    //
-    // Currently, the kernel isn't the overall encode bottleneck, but if that changes this is the main opportunity for 
-    // optimization.
-    for (uint32_t token_idx = 0; token_idx < n_tokens; token_idx += 1) {
-        const uint8_t sym = calc_sym_input(token_idx);
+    AscendC::ShiftRight(ub_cdf_input, ub_cdf_input, (uint16_t)8, n_bins + 1);
+    AscendC::ShiftLeft(ub_cdf_input, ub_cdf_input, (uint16_t)8, n_bins + 1);
 
-        const uint64_t span = static_cast<uint64_t>(high) - static_cast<uint64_t>(low) + 1;
+    // Run a trial encode on each possible symbol to determined the encode pattern
+    for (uint8_t mock_sym = 0; mock_sym < n_bins; mock_sym++) {
+        const uint16_t c_low = ub_cdf_input(mock_sym);
+        const uint16_t c_high = mock_sym == max_symbol ? 0x0000U : ub_cdf_input(mock_sym + 1);
 
-        const uint32_t c_low = ub_cdf_input(sym);
-        const uint32_t c_high = sym == max_symbol ? 0x10000U : ub_cdf_input(sym + 1);
+        uint16_t next_pos = AscendC::ScalarCountLeadingZero(static_cast<uint64_t>(c_high & (~c_low))) - 47;
+        uint8_t len_base = static_cast<uint8_t>(next_pos);
 
-        high = (low - 1) + ((span * static_cast<uint64_t>(c_high)) >> 16);
-        low = (low) + ((span * static_cast<uint64_t>(c_low)) >> 16);
+        uint16_t base_encode = c_low;
+        base_encode = (base_encode >> (16 - len_base)) << (16 - len_base);
 
-        while (true) {
-            if (high < 0x80000000U) {
-                append_bit_and_pending(0, pending_bits, output_reg, output_reg_write_head, encoded_output, encoded_output_write_head);
-                low <<= 1;
-                high <<= 1;
-                high |= 1;
-            } else if (low >= 0x80000000U) {
-                append_bit_and_pending(1, pending_bits, output_reg, output_reg_write_head, encoded_output, encoded_output_write_head);
-                low <<= 1;
-                high <<= 1;
-                high |= 1;
-            } else if (low >= 0x40000000U && high < 0xC0000000U) {
-                pending_bits++;
-                low <<= 1;
-                low &= 0x7FFFFFFF;
-                high <<= 1;
-                high |= 0x80000001;
-            } else {
-                break;
-            }
+        uint16_t upper = base_encode + ((1 << (16 - len_base)));
+        uint16_t lower = upper - 1;
+
+        uint8_t len_break_upper = AscendC::ScalarCountLeadingZero(static_cast<uint64_t>(c_high & ~upper)) - 47;
+        uint8_t len_break_lower = AscendC::ScalarCountLeadingZero(static_cast<uint64_t>(lower & ~c_low)) - 47;
+
+        if (mock_sym == 0 || len_break_lower >= lens[mock_sym - 1]) {
+            len_break_lower -= 1;
         }
+
+        if (len_break_upper < len_break_lower) {
+            encodes[mock_sym] = upper;
+            lens[mock_sym] = len_break_upper;
+
+        } else {
+            encodes[mock_sym] = lower;
+            lens[mock_sym] = len_break_lower;
+        }
+
+        uint16_t c_high_mask;
+        c_high_mask = ((1 << lens[mock_sym]) - 1) << (16 - lens[mock_sym]); 
+        ub_cdf_input.SetValue(mock_sym + 1, (c_high & c_high_mask));
     }
 
-    pending_bits += 1;
-    if (low < 0x40000000U) {
-        append_bit_and_pending(0, pending_bits, output_reg, output_reg_write_head, encoded_output, encoded_output_write_head);
-    } else {
-        append_bit_and_pending(1, pending_bits, output_reg, output_reg_write_head, encoded_output, encoded_output_write_head);
+    uint32_t output_reg = 0;
+    uint32_t output_reg_write_head = 0;
+    for (uint32_t token_idx = 0; token_idx < n_tokens; token_idx += 1) {
+        const uint8_t sym = calc_sym_input(token_idx);
+        uint16_t encode = encodes[sym];
+        uint8_t len = lens[sym];
+        uint64_t pending_bits = 0;
+        for (auto bit = 0; bit < len; bit++) {
+            append_bit_and_pending((encode & 0x8000) >> 15, pending_bits, output_reg, output_reg_write_head, encoded_output, encoded_output_write_head);
+            encode <<= 1;
+        }
     }
 
     spill_partial_reg_to_shared(output_reg, output_reg_write_head, encoded_output, encoded_output_write_head);
@@ -279,7 +276,7 @@ __aicore__ inline void Encoder::encode(int layer_id, int channel_id) {
     outQ.FreeTensor(encoded_output);
 }
 
-__aicore__ inline void Encoder::append_bit_and_pending(
+__aicore__ inline void EncoderAsc::append_bit_and_pending(
     uint32_t bit,
     uint64_t& pending_bits,
     uint32_t& output_reg,
@@ -308,7 +305,7 @@ __aicore__ inline void Encoder::append_bit_and_pending(
     }
 }
 
-__aicore__ inline void Encoder::spill_reg_to_shared(
+__aicore__ inline void EncoderAsc::spill_reg_to_shared(
     uint32_t& output_reg,
     uint32_t& output_reg_write_head,
     AscendC::LocalTensor<uint8_t> encoded_output,
@@ -322,7 +319,7 @@ __aicore__ inline void Encoder::spill_reg_to_shared(
     output_reg_write_head = 0;
 }
 
-__aicore__ inline void Encoder::spill_partial_reg_to_shared(
+__aicore__ inline void EncoderAsc::spill_partial_reg_to_shared(
     uint32_t& output_reg,
     uint32_t& output_reg_write_head,
     AscendC::LocalTensor<uint8_t> encoded_output,
@@ -342,7 +339,7 @@ __aicore__ inline void Encoder::spill_partial_reg_to_shared(
 } // namespace cachegen
 } // namespace kvcache_ops
 
-extern "C" __global__ __aicore__ void encode_kernel (
+extern "C" __global__ __aicore__ void encode_v2_kernel (
     GM_ADDR cdf_data_ptr,
     GM_ADDR input_data_ptr,
     GM_ADDR output_data_ptr,
@@ -355,7 +352,7 @@ extern "C" __global__ __aicore__ void encode_kernel (
 ) {
     AscendC::TPipe pipe{};
 
-    kvcache_ops::cachegen::impl::Encoder encoder {
+    kvcache_ops::cachegen::impl::EncoderAsc encoder {
         cdf_data_ptr,
         input_data_ptr,
         output_data_ptr,
@@ -382,7 +379,7 @@ extern "C" __global__ __aicore__ void encode_kernel (
 namespace kvcache_ops {
 namespace cachegen {
 
-void encode(
+void encode_v2(
     uint8_t* cdf_data_ptr,
     uint8_t* input_data_ptr,
     uint8_t* output_data_ptr,
@@ -397,7 +394,7 @@ void encode(
 
     int blockDim = n_layers * n_channels < n_aiv ? n_layers * n_channels : n_aiv;
 
-    encode_kernel<<<blockDim, nullptr, stream>>>(
+    encode_v2_kernel<<<blockDim, nullptr, stream>>>(
         cdf_data_ptr,
         input_data_ptr,
         output_data_ptr,
