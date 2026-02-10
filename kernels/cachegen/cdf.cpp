@@ -148,6 +148,7 @@ __aicore__ inline void CdfCalulator::run(int layer_id, int channel_id) {
 }
 
 __aicore__ inline void CdfCalulator::tally(int layer_id, int channel_id) {
+    // Arbitrary size of 256 exceeds the max bin size which is typically not more than 32
     int32_t count[256] = {};
     auto layer_offset = layer_id * n_channels * n_tokens;
     uint32_t token_idx = channel_id;

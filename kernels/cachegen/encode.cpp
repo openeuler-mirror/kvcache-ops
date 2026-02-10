@@ -1,6 +1,4 @@
 #include "kernel_operator.h"
-#include <cstring>
-#include <stdexcept>
 
 namespace kvcache_ops {
 namespace cachegen {
@@ -68,9 +66,8 @@ private:
     int32_t tokens_in_tail;
     bool has_tail_chunk;
 
-    __aicore__ inline void append_bit_and_pending(
+    __aicore__ inline void append_bit(
         uint32_t bit,
-        uint64_t& pending_bits,
         uint32_t& output_reg,
         uint32_t& output_reg_write_head,
         AscendC::LocalTensor<uint8_t> encoded_output,
@@ -251,9 +248,8 @@ __aicore__ inline void EncoderAsc::encode(int layer_id, int channel_id) {
         const uint8_t sym = calc_sym_input(token_idx);
         uint16_t encode = encodes[sym];
         uint8_t len = lens[sym];
-        uint64_t pending_bits = 0;
         for (auto bit = 0; bit < len; bit++) {
-            append_bit_and_pending((encode & 0x8000) >> 15, pending_bits, output_reg, output_reg_write_head, encoded_output, encoded_output_write_head);
+            append_bit((encode & 0x8000) >> 15, output_reg, output_reg_write_head, encoded_output, encoded_output_write_head);
             encode <<= 1;
         }
     }
@@ -276,9 +272,8 @@ __aicore__ inline void EncoderAsc::encode(int layer_id, int channel_id) {
     outQ.FreeTensor(encoded_output);
 }
 
-__aicore__ inline void EncoderAsc::append_bit_and_pending(
+__aicore__ inline void EncoderAsc::append_bit(
     uint32_t bit,
-    uint64_t& pending_bits,
     uint32_t& output_reg,
     uint32_t& output_reg_write_head,
     AscendC::LocalTensor<uint8_t> encoded_output,
@@ -289,19 +284,6 @@ __aicore__ inline void EncoderAsc::append_bit_and_pending(
     output_reg_write_head += 1;
     if (output_reg_write_head == 32) {
       spill_reg_to_shared(output_reg, output_reg_write_head, encoded_output, encoded_output_write_head);
-    }
-
-    for(;pending_bits > 0;){
-        int32_t pending_bit = 1 - bit;
-        const unsigned int remaining = min(static_cast<unsigned int>(pending_bits), static_cast<unsigned int>(32 - output_reg_write_head));
-        output_reg <<= remaining;
-        output_reg |= (pending_bit << remaining) - pending_bit;
-        pending_bits -= remaining;
-        output_reg_write_head += remaining;
-        if (output_reg_write_head == 32) {
-            spill_reg_to_shared(output_reg, output_reg_write_head, encoded_output,
-                                encoded_output_write_head);
-        }
     }
 }
 

@@ -1,6 +1,4 @@
 #include "kernel_operator.h"
-#include <cstring>
-#include <stdexcept>
 
 namespace kvcache_ops {
 namespace cachegen {
@@ -35,7 +33,6 @@ public:
     const static uint32_t CHANNELS_PER_DECODE = 32;
 
 private:
-    int64_t cycles[32] = {0};
     AscendC::GlobalTensor<uint16_t> gm_cdf;
     AscendC::GlobalTensor<uint8_t> gm_input_bytestream;
     AscendC::GlobalTensor<uint64_t> gm_input_lens;
