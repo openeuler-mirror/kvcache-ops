@@ -175,6 +175,13 @@ private:
             realTokenIdx = tokenIdx + innerTokenIdx;
             slot = static_cast<int64_t>(slotmappingPtr[realTokenIdx]);
             
+            // NOTE(niming): Skip tokens that have already been matched in the prefix cache.
+            // A slot value of -1 indicates a prefix-match hit, meaning the KV data 
+            // for this token already exists in the cache and does not need processing.
+            if (slot == -1) {
+                continue;
+            }
+
             // work out where is it in the vllm page buff
             blockIdx = slot / this->blockSize_;
             blockOffset = slot % this->blockSize_;
@@ -217,6 +224,10 @@ private:
             realTokenIdx = tokenIdx + innerTokenIdx;
             slot = static_cast<int64_t>(slotmappingPtr[realTokenIdx]);
             
+            if (slot == -1) {
+                continue;
+            }
+
             blockIdx = slot / this->blockSize_;
             blockOffset = slot % this->blockSize_;
 
