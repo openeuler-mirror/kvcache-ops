@@ -27,15 +27,22 @@ function(detect_cann_version)
         string(REGEX MATCH "([0-9]+)\\.([0-9]+)" CANN_VERSION "${REAL_PATH}")
     endif()
 
-    if(CANN_VERSION VERSION_GREATER_EQUAL "8.3")
+    if(CANN_VERSION VERSION_EQUAL "8.3")
         set(CANN_IS_83 TRUE)
     else()
         set(CANN_IS_83 FALSE)
     endif()
     
+    if(CANN_VERSION VERSION_EQUAL "8.5")
+        set(CANN_IS_85 TRUE)
+    else()
+        set(CANN_IS_85 FALSE)
+    endif()
+
     set(CANN_VERSION "${CANN_VERSION}" PARENT_SCOPE)
     set(CANN_IS_83 "${CANN_IS_83}" PARENT_SCOPE)
-    
+    set(CANN_IS_85 "${CANN_IS_85}" PARENT_SCOPE)
+
     message(STATUS "CANN Version: ${CANN_VERSION}")
 endfunction()
 
@@ -73,18 +80,25 @@ function(ascendc_library_with_def target_name target_type)
 
     # Modify AIC_BUILD_MODE/AIV_BUILD_MODE according to the cann version.
     detect_cann_version()
-    if(CANN_IS_83)
+    if(CANN_IS_83 OR CANN_IS_85)
         # CANN 8.3+： AIC_BUILD_MODE : ${BUILD_MODE}_aic
         set(AIC_BUILD_MODE "${BUILD_MODE}_aic")
         set(AIV_BUILD_MODE "${BUILD_MODE}_aiv")
-        message(STATUS "Using CANN 8.3+ mode: ${AIC_BUILD_MODE}")
-        message(STATUS "Using CANN 8.3+ mode: ${AIV_BUILD_MODE}")
+        message(STATUS "Using CANN 8.3/8.5 mode: ${AIC_BUILD_MODE}")
+        message(STATUS "Using CANN 8.3/8.5 mode: ${AIV_BUILD_MODE}")
     else()
         # CANN 8.2： AIC_BUILD_MODE : aic
         set(AIC_BUILD_MODE "aic")
         set(AIV_BUILD_MODE "aiv")
         message(STATUS "Using CANN 8.2 mode: ${AIC_BUILD_MODE}")
         message(STATUS "Using CANN 8.2 mode: ${AIV_BUILD_MODE}")
+    endif()
+
+    # Conditionally add RUN_MODE for CANN 8.5+
+    if(CANN_IS_85)
+        set(_run_mode_arg -DRUN_MODE=${RUN_MODE})
+    else()
+        set(_run_mode_arg "")
     endif()
 
     ExternalProject_Add(${device_target}_precompile
@@ -124,6 +138,7 @@ function(ascendc_library_with_def target_name target_type)
                             -DINCLUDES=$<TARGET_PROPERTY:${target_name}_interface,INCLUDES>
                             -DDYNAMIC_MODE=${DYNAMIC_MODE}
                             -DBUILD_MODE=${BUILD_MODE}
+                            ${_run_mode_arg}
                             -DDST_DIR=${${device_target}_auto_gen_dir}
                             -DINCLUDE_DIR=${${device_target}_include_dir}
                             -DASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH}
