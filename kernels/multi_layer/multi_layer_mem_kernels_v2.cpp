@@ -28,7 +28,9 @@ public:
     __aicore__ inline void init(GM_ADDR pagedKVCaches, GM_ADDR cacheTensor, GM_ADDR slotmappings,
                                 const int64_t hiddenDims, const int32_t numLayers, const int64_t pageBuffSize,
                                 const int32_t numTokensChunk, const int64_t perLoopBuffSize,
-                                const int32_t maxTokensPerLoop, const bool page2L, AscendC::TPipe *pipe)
+                                const int32_t maxTokensPerLoop, const bool page2L, AscendC::TPipe *pipe,
+                                const int64_t kHiddenDims = 0, const int64_t vHiddenDims = 0,
+                                const int64_t dsaHiddenDims = 0)
     {
         this->pipe_ = pipe;
         this->numLayers_ = numLayers;
@@ -40,8 +42,41 @@ public:
         this->page2L_ = page2L;
         this->valid_ = true;
         
+        // For MLA_KV and DSA_KV, store different hidden_dims
+        if constexpr (kvcache_fmt == kvcache_ops::KVCacheFormat::MLA_KV || 
+                      kvcache_fmt == kvcache_ops::KVCacheFormat::DSA_KV) {
+            this->kHiddenDims_ = kHiddenDims;
+            this->vHiddenDims_ = vHiddenDims;
+            this->dsaHiddenDims_ = dsaHiddenDims;
+        }
+        
         // we assume this is taken care of in the kernel launch.
         this->pipe_->InitBuffer(pagedTokenQue_, 2, this->perLoopBuffSize_);
+    }
+
+    __aicore__ inline int64_t GetHiddenDims(const int cacheIdx) {
+        if constexpr (kvcache_fmt == kvcache_ops::KVCacheFormat::MLA_KV) {
+            return (cacheIdx == 0) ? this->kHiddenDims_ : this->vHiddenDims_;
+        } else if constexpr (kvcache_fmt == kvcache_ops::KVCacheFormat::DSA_KV) {
+            if (cacheIdx == 0) return this->kHiddenDims_;
+            else if (cacheIdx == 1) return this->vHiddenDims_;
+            else return this->dsaHiddenDims_;
+        } else {
+            return this->hiddenDims_;
+        }
+    }
+
+    __aicore__ inline int64_t GetLMCBaseOffset(const int cacheIdx) {
+        if constexpr (kvcache_fmt == kvcache_ops::KVCacheFormat::MLA_KV) {
+            if (cacheIdx == 0) return 0;
+            else return this->numLayers_ * this->numTokensChunk_ * this->kHiddenDims_;
+        } else if constexpr (kvcache_fmt == kvcache_ops::KVCacheFormat::DSA_KV) {
+            if (cacheIdx == 0) return 0;
+            else if (cacheIdx == 1) return this->numLayers_ * this->numTokensChunk_ * this->kHiddenDims_;
+            else return this->numLayers_ * this->numTokensChunk_ * (this->kHiddenDims_ + this->vHiddenDims_);
+        } else {
+            return static_cast<int64_t>(cacheIdx) * this->numLayers_ * this->numTokensChunk_ * this->hiddenDims_;
+        }
     }
 
     __aicore__ inline void _page2LTransfer(__gm__ uint8_t *pagedKVCaches, __gm__ uint8_t* cacheTensor, 
@@ -53,6 +88,9 @@ public:
         // get the slotmappings 
         __gm__ slot_t *slotmappingPtr = reinterpret_cast<__gm__ slot_t*>(slotmappings);
         
+        // Get the correct hidden_dims for this cacheIdx
+        int64_t hiddenDims = GetHiddenDims(cacheIdx);
+        
         // 1. alloc per layer per loop cache buffer
         local_scalar_t perLayerSingleCacheBuffer = this->pagedTokenQue_.template AllocTensor<scalar_t>();
         int64_t slot;      
@@ -61,10 +99,10 @@ public:
         // 2. copy num tokens
         for (int64_t tokenIdx = startTokensIdx; tokenIdx < endTokensIdx; tokenIdx++) {
             slot = static_cast<int64_t>(slotmappingPtr[tokenIdx]);
-            tmpPagedOffset = pagedOffset + slot * this->hiddenDims_;
-            localTensorTokenOffset = (tokenIdx - startTokensIdx) * this->hiddenDims_;
-            AscendC::DataCopy(perLayerSingleCacheBuffer[localTensorTokenOffset], this->pagedTokenGlobal_[tmpPagedOffset], 
-                              this->hiddenDims_);
+            tmpPagedOffset = pagedOffset + slot * hiddenDims;
+            localTensorTokenOffset = (tokenIdx - startTokensIdx) * hiddenDims;
+            AscendC::DataCopy(perLayerSingleCacheBuffer[localTensorTokenOffset], this->pagedTokenGlobal_[tmpPagedOffset],
+                              hiddenDims);
         }
 
         // 3. enque & deque
@@ -72,11 +110,12 @@ public:
         perLayerSingleCacheBuffer = pagedTokenQue_.DeQue<scalar_t>();
         
         // 4. copy singleCache buffer to the right global idx
-        int64_t cacheTensorLayerOffset = cacheIdx * this->numLayers_ * this->numTokensChunk_ * this->hiddenDims_ + 
-                                         layerIdx * this->numTokensChunk_ * this->hiddenDims_ +
-                                         startTokensIdx * this->hiddenDims_;
+        // For MLA_KV and DSA_KV, use the correct base offset
+        int64_t cacheTensorLayerOffset = GetLMCBaseOffset(cacheIdx) + 
+                                         static_cast<int64_t>(layerIdx) * this->numTokensChunk_ * hiddenDims +
+                                         static_cast<int64_t>(startTokensIdx) * hiddenDims;
         AscendC::DataCopy(this->lmcBufferGlobal_[cacheTensorLayerOffset], perLayerSingleCacheBuffer, 
-                          actualTokensPerInnerLoop * this->hiddenDims_);
+                          actualTokensPerInnerLoop * hiddenDims);
 
         // 5. Free
         pagedTokenQue_.FreeTensor(perLayerSingleCacheBuffer);
@@ -91,16 +130,20 @@ public:
         // get the slotmappings 
         __gm__ slot_t *slotmappingPtr = reinterpret_cast<__gm__ slot_t*>(slotmappings);
         
+        // Get the correct hidden_dims for this cacheIdx
+        int64_t hiddenDims = GetHiddenDims(cacheIdx);
+        
         // 1. alloc per layer per cache buffer
         local_scalar_t perLayerSingleCacheBuffer = this->pagedTokenQue_.template AllocTensor<scalar_t>();
         
         // 2. copy the L buffer to local
-        int64_t cacheTensorLayerOffset = cacheIdx * this->numLayers_ * this->numTokensChunk_ * this->hiddenDims_ +
-                                         layerIdx * this->numTokensChunk_ * this->hiddenDims_ +
-                                         startTokensIdx * this->hiddenDims_;
+        // For MLA_KV and DSA_KV, use the correct base offset
+        int64_t cacheTensorLayerOffset = GetLMCBaseOffset(cacheIdx) + 
+                                         static_cast<int64_t>(layerIdx) * this->numTokensChunk_ * hiddenDims +
+                                         static_cast<int64_t>(startTokensIdx) * hiddenDims;
         
         AscendC::DataCopy(perLayerSingleCacheBuffer, this->lmcBufferGlobal_[cacheTensorLayerOffset], 
-                          actualTokensPerInnerLoop * this->hiddenDims_);
+                          actualTokensPerInnerLoop * hiddenDims);
         
         // 3. enque & deque
         pagedTokenQue_.EnQue(perLayerSingleCacheBuffer);
@@ -113,10 +156,10 @@ public:
         // copy per token into paged
         for (int64_t tokenIdx = startTokensIdx; tokenIdx < endTokensIdx; tokenIdx++) {
             slot = static_cast<int64_t>(slotmappingPtr[tokenIdx]);
-            tmpPagedOffset = pagedOffset + slot * this->hiddenDims_;
-            localTensorTokenOffset = (tokenIdx - startTokensIdx) * this->hiddenDims_;
+            tmpPagedOffset = pagedOffset + slot * hiddenDims;
+            localTensorTokenOffset = (tokenIdx - startTokensIdx) * hiddenDims;
             AscendC::DataCopy(this->pagedTokenGlobal_[tmpPagedOffset], perLayerSingleCacheBuffer[localTensorTokenOffset], 
-                              this->hiddenDims_);
+                              hiddenDims);
         }
 
         // 5. free
@@ -127,6 +170,8 @@ public:
                                              __gm__ uint8_t *slotmappings, const int cacheIdx, 
                                              const int layerIdx, const bool page2L) 
     {
+        // Get the correct hidden_dims for this cacheIdx
+        int64_t hiddenDims = GetHiddenDims(cacheIdx);
 
         // vllm 0.9.2：One pointer per layer, pointing to [2, pages, page_size, ...]
         // vllm 0.11.0：Two pointers per layer (Key and Value independent)
@@ -136,16 +181,16 @@ public:
         
         int64_t pagedOffset = 0;
         if constexpr (kvcache_fmt == kvcache_ops::KVCacheFormat::MERGED_KV) {
-            pagedOffset = cacheIdx * this->pageBuffSize_ * this->hiddenDims_;
+            pagedOffset = cacheIdx * this->pageBuffSize_ * hiddenDims;
         }
         
         // For both page2L and L2Page, we copy per token via and to the pagedcache.
         this->pagedTokenGlobal_.SetGlobalBuffer(reinterpret_cast<__gm__ scalar_t*>(pagedLayerKVCaches),
-                                                this->hiddenDims_);
+                                                hiddenDims);
         
         // For the cache tensor, since per layer is contiguous, we do contiguous copy.
         this->lmcBufferGlobal_.SetGlobalBuffer(reinterpret_cast<__gm__ scalar_t*>(cacheTensor),
-                                               this->numTokensChunk_*this->hiddenDims_);
+                                               this->numTokensChunk_ * hiddenDims);
 
         // loop over tokens per loop
         int32_t startTokensIdx;
@@ -177,12 +222,17 @@ private:
     AscendC::GlobalTensor<scalar_t> lmcBufferGlobal_;
     int32_t numLayers_; // num layers
     int64_t pageBuffSize_; // pages * pageSize
-    int64_t hiddenDims_; // heads * headSize
+    int64_t hiddenDims_; // heads * headSize (for MERGED_KV and SEPARATE_KV)
     int32_t numTokensChunk_; // num tokens in the cache tensor chunk
     int32_t maxTokensPerLoop_; // num tokens per inner loop for transferring
     int64_t perLoopBuffSize_; // buffer size in innerloop within UB
     bool valid_;
     bool page2L_; // true, from pagedTensor to LMC, false otherwise
+    
+    // For MLA_KV and DSA_KV: different hidden_dims for K/V/DSA_K
+    int64_t kHiddenDims_;
+    int64_t vHiddenDims_;
+    int64_t dsaHiddenDims_;
 };
 
 #define MULTI_LAYER_PAGED_KV_COPY_V2_KERNEL_NAME(TYPE, SLOTTYPE, FMT) \
@@ -193,7 +243,8 @@ private:
         __gm__ uint8_t* pagedKVCaches, __gm__ uint8_t* dstCacheTensor, __gm__ uint8_t* slotmappings,    \
         const int64_t hiddenDims, const int32_t kvs, const int32_t numLayers,                           \
         const int64_t pageBuffSize, const int32_t numTokensChunk,                                       \
-        const int64_t perLoopBuffer, const int32_t maxTokensPerLoop, const bool page2L)                 \
+        const int64_t perLoopBuffer, const int32_t maxTokensPerLoop, const bool page2L,                 \
+        const int64_t kHiddenDims, const int64_t vHiddenDims, const int64_t dsaHiddenDims)              \
     {                                                                                                   \
         AscendC::TPipe pipe;                                                                            \
         MultiLayerPagedKVCopyV2<TYPE, SLOTTYPE, kvcache_ops::KVCacheFormat::FMT> op{};                  \
@@ -203,7 +254,8 @@ private:
         int32_t startLayersIdx = bIdx * layersPerCore;                                                  \
         int32_t endLayersIdx = min(numLayers, startLayersIdx + layersPerCore);                          \
         op.init(pagedKVCaches, dstCacheTensor, slotmappings, hiddenDims,                                \
-                numLayers, pageBuffSize, numTokensChunk, perLoopBuffer, maxTokensPerLoop, page2L, &pipe); \
+                numLayers, pageBuffSize, numTokensChunk, perLoopBuffer, maxTokensPerLoop, page2L, &pipe, \
+                kHiddenDims, vHiddenDims, dsaHiddenDims);                                               \
         for (int32_t layerIdx = startLayersIdx; layerIdx < endLayersIdx; layerIdx++) {                  \
             for (int32_t cacheIdx = 0; cacheIdx < kvs; cacheIdx++) {                                    \
                 op.processLayerCache(pagedKVCaches, dstCacheTensor, slotmappings, cacheIdx, layerIdx, page2L); \
@@ -213,7 +265,9 @@ private:
 
 #define EXPAND_FMT_V2(TYPE, SLOTTYPE) \
     MULTI_LAYER_PAGED_KV_COPY_V2_DECLARE(TYPE, SLOTTYPE, MERGED_KV) \
-    MULTI_LAYER_PAGED_KV_COPY_V2_DECLARE(TYPE, SLOTTYPE, SEPARATE_KV)
+    MULTI_LAYER_PAGED_KV_COPY_V2_DECLARE(TYPE, SLOTTYPE, SEPARATE_KV) \
+    MULTI_LAYER_PAGED_KV_COPY_V2_DECLARE(TYPE, SLOTTYPE, MLA_KV) \
+    MULTI_LAYER_PAGED_KV_COPY_V2_DECLARE(TYPE, SLOTTYPE, DSA_KV)
 
 #define EXPAND_SLOT_V2(TYPE) \
     EXPAND_FMT_V2(TYPE, int32_t) \
@@ -233,19 +287,23 @@ template<>                                                                      
 struct V2Launcher<TYPE, SLOTTYPE, KVCacheFormat::FMT> {                                                \
     static void Launch(uint32_t blockDim, void *stream,                                                \
                       uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, uint8_t *slotmappings,          \
-                      const V2Config& config)                                                          \
+                      const V2Config& config,                                                          \
+                      int64_t kHiddenDims = 0, int64_t vHiddenDims = 0, int64_t dsaHiddenDims = 0)     \
     {                                                                                                  \
         MULTI_LAYER_PAGED_KV_COPY_V2_KERNEL_NAME(TYPE, SLOTTYPE, FMT)<<<blockDim, nullptr, stream>>>( \
             pagedKVCaches, dstCacheTensor, slotmappings,                                               \
             config.common.hiddenDims, config.common.kvs, config.common.numLayers,                      \
             config.common.pageBuffSize, config.common.numTokensChunk,                                  \
-            config.perLoopBuffSize, config.maxTokensPerLoop, config.common.page2L);                    \
+            config.perLoopBuffSize, config.maxTokensPerLoop, config.common.page2L,                     \
+            kHiddenDims, vHiddenDims, dsaHiddenDims);                                                  \
     }                                                                                                  \
 };
 
 #define EXPAND_V2_LAUNCHER_FMT(TYPE, SLOTTYPE) \
     SPECIALIZE_V2_LAUNCHER(TYPE, SLOTTYPE, MERGED_KV) \
-    SPECIALIZE_V2_LAUNCHER(TYPE, SLOTTYPE, SEPARATE_KV)
+    SPECIALIZE_V2_LAUNCHER(TYPE, SLOTTYPE, SEPARATE_KV) \
+    SPECIALIZE_V2_LAUNCHER(TYPE, SLOTTYPE, MLA_KV) \
+    SPECIALIZE_V2_LAUNCHER(TYPE, SLOTTYPE, DSA_KV)
 
 #define EXPAND_V2_LAUNCHER_SLOT(TYPE) \
     EXPAND_V2_LAUNCHER_FMT(TYPE, int32_t) \
@@ -264,7 +322,9 @@ extern void multi_layer_kv_transfer_kernel_v2(kvcache_ops::AscendType type, kvca
                                               const int64_t hiddenDims, const int32_t kvs, const int32_t numLayers, 
                                               const int64_t pageBuffSize, const int32_t numTokensChunk, 
                                               const int64_t perLoopBuffer, const int32_t maxTokensPerLoop,
-                                              const bool page2L)
+                                              const bool page2L,
+                                              const int64_t kHiddenDims = 0, const int64_t vHiddenDims = 0, 
+                                              const int64_t dsaHiddenDims = 0)
 {
     auto config = kvcache_ops::MakeV2Config(
         hiddenDims, numLayers, pageBuffSize, numTokensChunk, page2L, kvs,
@@ -275,19 +335,19 @@ extern void multi_layer_kv_transfer_kernel_v2(kvcache_ops::AscendType type, kvca
         case kvcache_ops::AscendType::FP16:
             kvcache_ops::dispatch_paged_kernel_on_slot_type<kvcache_ops::V2Launcher, half>(
                 slotType, kvcacheFormat, blockDim, stream, 
-                pagedKVCaches, dstCacheTensor, slotmappings, config);
+                pagedKVCaches, dstCacheTensor, slotmappings, config, kHiddenDims, vHiddenDims, dsaHiddenDims);
             break;    
 #if (ASCEND_AICORE_ARCH >= 220)
         case kvcache_ops::AscendType::BF16:
             kvcache_ops::dispatch_paged_kernel_on_slot_type<kvcache_ops::V2Launcher, bfloat16_t>(
                 slotType, kvcacheFormat, blockDim, stream, 
-                pagedKVCaches, dstCacheTensor, slotmappings, config);
+                pagedKVCaches, dstCacheTensor, slotmappings, config, kHiddenDims, vHiddenDims, dsaHiddenDims);
             break;
 #endif
         case kvcache_ops::AscendType::INT8:
             kvcache_ops::dispatch_paged_kernel_on_slot_type<kvcache_ops::V2Launcher, int8_t>(
                 slotType, kvcacheFormat, blockDim, stream, 
-                pagedKVCaches, dstCacheTensor, slotmappings, config);
+                pagedKVCaches, dstCacheTensor, slotmappings, config, kHiddenDims, vHiddenDims, dsaHiddenDims);
             break;
         default:
             ASCENDC_REPORT_NOT_SUPPORT(false, std::to_string(static_cast<int>(type)) + " is not supported.")

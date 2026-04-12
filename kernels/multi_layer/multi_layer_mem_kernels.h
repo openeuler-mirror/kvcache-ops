@@ -102,8 +102,10 @@ __aicore__ inline __gm__ uint8_t* GetLayerBasePtr(
     // getting the right ptr to the paged kvcache layer
     if constexpr (fmt == KVCacheFormat::MERGED_KV) {
         return pagedKVCachesPtr[layerIdx];
-    } else {
+    } else if constexpr (fmt == KVCacheFormat::SEPARATE_KV || fmt == KVCacheFormat::MLA_KV) {
         return pagedKVCachesPtr[layerIdx * 2 + kvIdx];
+    } else if constexpr (fmt == KVCacheFormat::DSA_KV) {
+        return pagedKVCachesPtr[layerIdx * 3 + kvIdx];
     }
 }
 
@@ -188,6 +190,201 @@ private:
         return static_cast<int64_t>(kvIdx) * numLayers_ * numTokensChunk_ * hiddenDims_ +
                static_cast<int64_t>(layerIdx) * numTokensChunk_ * hiddenDims_ +
                static_cast<int64_t>(tokenIdx) * hiddenDims_;
+    }
+};
+
+template <typename scalar_t, typename slot_t, KVCacheFormat fmt>
+struct MLAPolicy {
+    int64_t k_hidden_dims_;
+    int64_t v_hidden_dims_;
+    int32_t numLayers_;
+    int64_t pageBuffSize_;
+    int32_t numTokensChunk_;
+    bool page2L_;
+
+    __aicore__ inline void Init(
+        int64_t k_hidden_dims, int64_t v_hidden_dims, int32_t numLayers,
+        int64_t pageBuffSize, int32_t numTokensChunk, bool page2L, int32_t kvs)
+    {
+        k_hidden_dims_ = k_hidden_dims;
+        v_hidden_dims_ = v_hidden_dims;
+        numLayers_ = numLayers;
+        pageBuffSize_ = pageBuffSize;
+        numTokensChunk_ = numTokensChunk;
+        page2L_ = page2L;
+    }
+
+    __aicore__ inline int64_t GetHiddenDims(int32_t kvIdx)
+    {
+        return (kvIdx == 0) ? k_hidden_dims_ : v_hidden_dims_;
+    }
+
+    __aicore__ inline void InitBuffer(
+        AscendC::TPipe* pipe, 
+        AscendC::TQueBind<AscendC::QuePosition::VECIN, AscendC::QuePosition::VECOUT, 4>& tokenQue)
+    {
+        pipe->InitBuffer(tokenQue, 4, k_hidden_dims_ * sizeof(scalar_t));
+    }
+
+    __aicore__ inline void ProcessToken(
+        AscendC::TQueBind<AscendC::QuePosition::VECIN, AscendC::QuePosition::VECOUT, 4>& tokenQue,
+        GM_ADDR pagedKVCaches, GM_ADDR cacheTensor, int64_t slot, int32_t tokenIdx, int32_t kvIdx)
+    {
+        int64_t hiddenDims = GetHiddenDims(kvIdx);
+        
+        for (int32_t layerIdx = 0; layerIdx < numLayers_; layerIdx++) {
+            __gm__ uint8_t* layerBase = GetLayerBasePtr<fmt>(pagedKVCaches, layerIdx, kvIdx);
+            
+            int64_t pagedOffset = GetPagedOffset(slot, kvIdx);
+            int64_t lmcOffset = GetLMCOffset(kvIdx, layerIdx, tokenIdx);
+
+            AscendC::GlobalTensor<scalar_t> pagedGlobal;
+            AscendC::GlobalTensor<scalar_t> lmcGlobal;
+            
+            pagedGlobal.SetGlobalBuffer(
+                reinterpret_cast<__gm__ scalar_t*>(layerBase) + pagedOffset, hiddenDims);
+            lmcGlobal.SetGlobalBuffer(
+                reinterpret_cast<__gm__ scalar_t*>(cacheTensor) + lmcOffset, hiddenDims);
+
+            AscendC::LocalTensor<scalar_t> localTensor = tokenQue.template AllocTensor<scalar_t>();
+            
+            if (page2L_) {
+                AscendC::DataCopy(localTensor, pagedGlobal, hiddenDims);
+                tokenQue.EnQue(localTensor);
+                localTensor = tokenQue.template DeQue<scalar_t>();
+                AscendC::DataCopy(lmcGlobal, localTensor, hiddenDims);
+            } else {
+                AscendC::DataCopy(localTensor, lmcGlobal, hiddenDims);
+                tokenQue.EnQue(localTensor);
+                localTensor = tokenQue.template DeQue<scalar_t>();
+                AscendC::DataCopy(pagedGlobal, localTensor, hiddenDims);
+            }
+            
+            tokenQue.FreeTensor(localTensor);
+        }
+    }
+
+private:
+    __aicore__ inline int64_t GetPagedOffset(int64_t slot, int32_t kvIdx)
+    {
+        return slot * GetHiddenDims(kvIdx);
+    }
+
+    __aicore__ inline int64_t GetLMCOffset(int32_t kvIdx, int32_t layerIdx, int32_t tokenIdx)
+    {
+        int64_t hiddenDims = GetHiddenDims(kvIdx);
+        int64_t base_offset = 0;
+        
+        if (kvIdx == 1) {
+            base_offset = numLayers_ * numTokensChunk_ * k_hidden_dims_;
+        }
+        
+        return base_offset + 
+               static_cast<int64_t>(layerIdx) * numTokensChunk_ * hiddenDims +
+               static_cast<int64_t>(tokenIdx) * hiddenDims;
+    }
+};
+
+template <typename scalar_t, typename slot_t, KVCacheFormat fmt>
+struct DSAPolicy {
+    int64_t k_hidden_dims_;
+    int64_t v_hidden_dims_;
+    int64_t dsa_hidden_dims_;
+    int32_t numLayers_;
+    int64_t pageBuffSize_;
+    int32_t numTokensChunk_;
+    bool page2L_;
+
+    __aicore__ inline void Init(
+        int64_t k_hidden_dims, int64_t v_hidden_dims, int64_t dsa_hidden_dims,
+        int32_t numLayers, int64_t pageBuffSize, int32_t numTokensChunk,
+        bool page2L, int32_t kvs)
+    {
+        k_hidden_dims_ = k_hidden_dims;
+        v_hidden_dims_ = v_hidden_dims;
+        dsa_hidden_dims_ = dsa_hidden_dims;
+        numLayers_ = numLayers;
+        pageBuffSize_ = pageBuffSize;
+        numTokensChunk_ = numTokensChunk;
+        page2L_ = page2L;
+    }
+
+    __aicore__ inline int64_t GetHiddenDims(int32_t kvIdx)
+    {
+        if (kvIdx == 0) return k_hidden_dims_;
+        else if (kvIdx == 1) return v_hidden_dims_;
+        else return dsa_hidden_dims_;
+    }
+
+    __aicore__ inline void InitBuffer(
+        AscendC::TPipe* pipe, 
+        AscendC::TQueBind<AscendC::QuePosition::VECIN, AscendC::QuePosition::VECOUT, 4>& tokenQue)
+    {
+        int64_t max_hidden_dims = k_hidden_dims_;
+        if (v_hidden_dims_ > max_hidden_dims) max_hidden_dims = v_hidden_dims_;
+        if (dsa_hidden_dims_ > max_hidden_dims) max_hidden_dims = dsa_hidden_dims_;
+        
+        pipe->InitBuffer(tokenQue, 4, max_hidden_dims * sizeof(scalar_t));
+    }
+
+    __aicore__ inline void ProcessToken(
+        AscendC::TQueBind<AscendC::QuePosition::VECIN, AscendC::QuePosition::VECOUT, 4>& tokenQue,
+        GM_ADDR pagedKVCaches, GM_ADDR cacheTensor, int64_t slot, int32_t tokenIdx, int32_t kvIdx)
+    {
+        int64_t hiddenDims = GetHiddenDims(kvIdx);
+        
+        for (int32_t layerIdx = 0; layerIdx < numLayers_; layerIdx++) {
+            __gm__ uint8_t* layerBase = GetLayerBasePtr<fmt>(pagedKVCaches, layerIdx, kvIdx);
+            
+            int64_t pagedOffset = GetPagedOffset(slot, kvIdx);
+            int64_t lmcOffset = GetLMCOffset(kvIdx, layerIdx, tokenIdx);
+
+            AscendC::GlobalTensor<scalar_t> pagedGlobal;
+            AscendC::GlobalTensor<scalar_t> lmcGlobal;
+            
+            pagedGlobal.SetGlobalBuffer(
+                reinterpret_cast<__gm__ scalar_t*>(layerBase) + pagedOffset, hiddenDims);
+            lmcGlobal.SetGlobalBuffer(
+                reinterpret_cast<__gm__ scalar_t*>(cacheTensor) + lmcOffset, hiddenDims);
+
+            AscendC::LocalTensor<scalar_t> localTensor = tokenQue.template AllocTensor<scalar_t>();
+            
+            if (page2L_) {
+                AscendC::DataCopy(localTensor, pagedGlobal, hiddenDims);
+                tokenQue.EnQue(localTensor);
+                localTensor = tokenQue.template DeQue<scalar_t>();
+                AscendC::DataCopy(lmcGlobal, localTensor, hiddenDims);
+            } else {
+                AscendC::DataCopy(localTensor, lmcGlobal, hiddenDims);
+                tokenQue.EnQue(localTensor);
+                localTensor = tokenQue.template DeQue<scalar_t>();
+                AscendC::DataCopy(pagedGlobal, localTensor, hiddenDims);
+            }
+            
+            tokenQue.FreeTensor(localTensor);
+        }
+    }
+
+private:
+    __aicore__ inline int64_t GetPagedOffset(int64_t slot, int32_t kvIdx) 
+    {
+        return slot * GetHiddenDims(kvIdx);
+    }
+
+    __aicore__ inline int64_t GetLMCOffset(int32_t kvIdx, int32_t layerIdx, int32_t tokenIdx) 
+    {
+        int64_t hiddenDims = GetHiddenDims(kvIdx);
+        int64_t base_offset = 0;
+        
+        if (kvIdx == 1) {
+            base_offset = numLayers_ * numTokensChunk_ * k_hidden_dims_;
+        } else if (kvIdx == 2) {
+            base_offset = numLayers_ * numTokensChunk_ * (k_hidden_dims_ + v_hidden_dims_);
+        }
+        
+        return base_offset +
+               static_cast<int64_t>(layerIdx) * numTokensChunk_ * hiddenDims +
+               static_cast<int64_t>(tokenIdx) * hiddenDims;
     }
 };
 
@@ -371,7 +568,10 @@ struct StandardLauncher {
         uint8_t* pagedKVCaches, 
         uint8_t* dstCacheTensor, 
         uint8_t* slotmappings,
-        const StandardConfig& config); 
+        const StandardConfig& config,
+        int64_t kHiddenDims = 0,
+        int64_t vHiddenDims = 0,
+        int64_t dsaHiddenDims = 0); 
 };
 
 template<typename scalar_t, typename slot_t, KVCacheFormat fmt>
@@ -382,7 +582,10 @@ struct Chunk310PLauncher {
         uint8_t* pagedKVCaches, 
         uint8_t* dstCacheTensor, 
         uint8_t* slotmappings,
-        const Chunk310PConfig& config);
+        const Chunk310PConfig& config,
+        int64_t kHiddenDims = 0,
+        int64_t vHiddenDims = 0,
+        int64_t dsaHiddenDims = 0);
 };
 
 template<typename scalar_t, typename slot_t, KVCacheFormat fmt>
@@ -393,7 +596,10 @@ struct V2Launcher {
         uint8_t* pagedKVCaches, 
         uint8_t* dstCacheTensor, 
         uint8_t* slotmappings,
-        const V2Config& config);
+        const V2Config& config,
+        int64_t kHiddenDims = 0,
+        int64_t vHiddenDims = 0,
+        int64_t dsaHiddenDims = 0);
 };
 
 template<template<typename, typename, KVCacheFormat> class LauncherT, typename scalar_t, typename slot_t, typename ConfigT>
@@ -404,16 +610,31 @@ void dispatch_paged_kernel_on_format(
     uint8_t* pagedKVCaches, 
     uint8_t* dstCacheTensor, 
     uint8_t* slotmappings,
-    const ConfigT& config)
+    const ConfigT& config,
+    int64_t kHiddenDims = 0,
+    int64_t vHiddenDims = 0,
+    int64_t dsaHiddenDims = 0)
 {
     switch (kvcacheFormat) {
         case KVCacheFormat::MERGED_KV:
             LauncherT<scalar_t, slot_t, KVCacheFormat::MERGED_KV>::Launch(
-                blockDim, stream, pagedKVCaches, dstCacheTensor, slotmappings, config);
+                blockDim, stream, pagedKVCaches, dstCacheTensor, slotmappings, config,
+                kHiddenDims, vHiddenDims, dsaHiddenDims);
             break;
         case KVCacheFormat::SEPARATE_KV:
             LauncherT<scalar_t, slot_t, KVCacheFormat::SEPARATE_KV>::Launch(
-                blockDim, stream, pagedKVCaches, dstCacheTensor, slotmappings, config);
+                blockDim, stream, pagedKVCaches, dstCacheTensor, slotmappings, config,
+                kHiddenDims, vHiddenDims, dsaHiddenDims);
+            break;
+        case KVCacheFormat::MLA_KV:
+            LauncherT<scalar_t, slot_t, KVCacheFormat::MLA_KV>::Launch(
+                blockDim, stream, pagedKVCaches, dstCacheTensor, slotmappings, config,
+                kHiddenDims, vHiddenDims, dsaHiddenDims);
+            break;
+        case KVCacheFormat::DSA_KV:
+            LauncherT<scalar_t, slot_t, KVCacheFormat::DSA_KV>::Launch(
+                blockDim, stream, pagedKVCaches, dstCacheTensor, slotmappings, config,
+                kHiddenDims, vHiddenDims, dsaHiddenDims);
             break;
         default:
             ASCENDC_REPORT_NOT_SUPPORT(false, "Unsupported KVCacheFormat.");
@@ -430,18 +651,23 @@ void dispatch_paged_kernel_on_slot_type(
     uint8_t* pagedKVCaches, 
     uint8_t* dstCacheTensor, 
     uint8_t* slotmappings,
-    const ConfigT& config) 
+    const ConfigT& config,
+    int64_t kHiddenDims = 0,
+    int64_t vHiddenDims = 0,
+    int64_t dsaHiddenDims = 0) 
 {
     switch (slotType) {
         case AscendType::INT32:
             dispatch_paged_kernel_on_format<LauncherT, scalar_t, int32_t>(
                 kvcacheFormat, blockDim, stream, 
-                pagedKVCaches, dstCacheTensor, slotmappings, config);
+                pagedKVCaches, dstCacheTensor, slotmappings, config,
+                kHiddenDims, vHiddenDims, dsaHiddenDims);
             break;
         case AscendType::INT64:
             dispatch_paged_kernel_on_format<LauncherT, scalar_t, int64_t>(
                 kvcacheFormat, blockDim, stream, 
-                pagedKVCaches, dstCacheTensor, slotmappings, config);
+                pagedKVCaches, dstCacheTensor, slotmappings, config,
+                kHiddenDims, vHiddenDims, dsaHiddenDims);
             break;
         default:
             ASCENDC_REPORT_NOT_SUPPORT(false, std::to_string(static_cast<int>(slotType)) + " is not supported.")
