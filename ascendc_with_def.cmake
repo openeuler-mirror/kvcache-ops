@@ -27,21 +27,24 @@ function(detect_cann_version)
         string(REGEX MATCH "([0-9]+)\\.([0-9]+)" CANN_VERSION "${REAL_PATH}")
     endif()
 
-    if(CANN_VERSION VERSION_EQUAL "8.3")
-        set(CANN_IS_83 TRUE)
+    # CANN 8.3 and later use ${BUILD_MODE}_aic/${BUILD_MODE}_aiv.
+    if(CANN_VERSION VERSION_GREATER_EQUAL "8.3")
+        set(CANN_IS_83_OR_LATER TRUE)
     else()
-        set(CANN_IS_83 FALSE)
-    endif()
-    
-    if(CANN_VERSION VERSION_EQUAL "8.5")
-        set(CANN_IS_85 TRUE)
-    else()
-        set(CANN_IS_85 FALSE)
+        set(CANN_IS_83_OR_LATER FALSE)
     endif()
 
+    # CANN 8.5 and later require RUN_MODE in device preprocess.
+    if(CANN_VERSION VERSION_GREATER_EQUAL "8.5")
+        set(CANN_IS_85_OR_LATER TRUE)
+    else()
+        set(CANN_IS_85_OR_LATER FALSE)
+    endif()
+
+
     set(CANN_VERSION "${CANN_VERSION}" PARENT_SCOPE)
-    set(CANN_IS_83 "${CANN_IS_83}" PARENT_SCOPE)
-    set(CANN_IS_85 "${CANN_IS_85}" PARENT_SCOPE)
+    set(CANN_IS_83_OR_LATER "${CANN_IS_83_OR_LATER}" PARENT_SCOPE)
+    set(CANN_IS_85_OR_LATER "${CANN_IS_85_OR_LATER}" PARENT_SCOPE)
 
     message(STATUS "CANN Version: ${CANN_VERSION}")
 endfunction()
@@ -80,14 +83,14 @@ function(ascendc_library_with_def target_name target_type)
 
     # Modify AIC_BUILD_MODE/AIV_BUILD_MODE according to the cann version.
     detect_cann_version()
-    if(CANN_IS_83 OR CANN_IS_85)
-        # CANN 8.3+： AIC_BUILD_MODE : ${BUILD_MODE}_aic
+    if(CANN_IS_83_OR_LATER)
+        # CANN 8.3+: AIC_BUILD_MODE : ${BUILD_MODE}_aic
         set(AIC_BUILD_MODE "${BUILD_MODE}_aic")
         set(AIV_BUILD_MODE "${BUILD_MODE}_aiv")
-        message(STATUS "Using CANN 8.3/8.5 mode: ${AIC_BUILD_MODE}")
-        message(STATUS "Using CANN 8.3/8.5 mode: ${AIV_BUILD_MODE}")
+        message(STATUS "Using CANN 8.3+ mode: ${AIC_BUILD_MODE}")
+        message(STATUS "Using CANN 8.3+ mode: ${AIV_BUILD_MODE}")
     else()
-        # CANN 8.2： AIC_BUILD_MODE : aic
+        # CANN 8.2: AIC_BUILD_MODE : aic
         set(AIC_BUILD_MODE "aic")
         set(AIV_BUILD_MODE "aiv")
         message(STATUS "Using CANN 8.2 mode: ${AIC_BUILD_MODE}")
@@ -95,7 +98,7 @@ function(ascendc_library_with_def target_name target_type)
     endif()
 
     # Conditionally add RUN_MODE for CANN 8.5+
-    if(CANN_IS_85)
+    if(CANN_IS_85_OR_LATER)
         set(_run_mode_arg -DRUN_MODE=${RUN_MODE})
     else()
         set(_run_mode_arg "")
