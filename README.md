@@ -1,4 +1,4 @@
-# KVCache Ops
+# KVCache Ops [deprecated]
 
 KVCache Ops is a simple library containing LLM KVCache related operators for Ascend NPU.
 
